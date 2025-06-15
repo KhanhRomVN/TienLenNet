@@ -1,0 +1,7 @@
+# pip install -r requirements.txt
+
+torch
+gymnasium
+numpy
+matplotlib
+tqdm
