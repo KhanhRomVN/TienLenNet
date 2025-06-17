@@ -5,3 +5,5 @@ gymnasium
 numpy
 matplotlib
 tqdm
+pygame==2.5.2
+pillow==10.0.0

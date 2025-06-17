@@ -48,3 +48,5 @@ tien_len_rl/
 [![Email](https://img.shields.io/badge/Gmail-khanhromvn%40gmail.com-red)](mailto:khanhromvn@gmail.com)
 
 ````
+
+python3 -m src.game.main
