@@ -97,24 +97,24 @@ class Card:
             suit_color = self.SUIT_COLORS[self.suit]
             
             # Draw rank with modern typography
-            font = pygame.font.SysFont('Arial', int(self.height * 0.25), bold=True)
-            
-            # Main rank text
+            # Smaller font for modern look
+            font = pygame.font.SysFont('Arial', int(self.height * 0.18), bold=True)
+            # Main rank text (smaller)
             rank_text = font.render(self.rank, True, suit_color)
             rank_pos = (10, 10)
             card_surface.blit(rank_text, rank_pos)
 
-            # Only render the center suit image/symbol
+            # Center suit icon smaller
             suit_img = self.CARD_SUIT_IMAGES.get(self.suit)
             if suit_img:
-                center_h = int(self.height * 0.40)
+                center_h = int(self.height * 0.22)
                 center_w = int(suit_img.get_width() * center_h / suit_img.get_height())
                 suit_img_center = pygame.transform.smoothscale(suit_img, (center_w, center_h))
                 center_pos = (self.width//2 - center_w//2,
                              self.height//2 - center_h//2)
                 card_surface.blit(suit_img_center, center_pos)
             else:
-                center_suit_size = int(self.height * 0.4)
+                center_suit_size = int(self.height * 0.22)
                 center_suit_font = pygame.font.SysFont('Arial', center_suit_size)
                 center_suit = center_suit_font.render(self.SUIT_SYMBOLS[self.suit], True, suit_color)
                 center_pos = (self.width//2 - center_suit.get_width()//2,
@@ -151,15 +151,20 @@ class Card:
                 pygame.draw.line(card_surface, pattern_color, (start_x, start_y), (end_x, end_y), 1)
         
         # Draw selection/hover effects
-        if self.selected or self.hover:
-            glow_size = 8
-            glow_surf = pygame.Surface((self.width + glow_size*2, self.height + glow_size*2), pygame.SRCALPHA)
-            glow_color = (255, 215, 0, int(180 * self.selection_animation)) if self.selected else (200, 200, 200, 80)
-            pygame.draw.rect(glow_surf, glow_color, (0, 0, glow_surf.get_width(), glow_surf.get_height()),
-                            border_radius=12)
-            
-            # Draw glow behind card
-            screen.blit(glow_surf, (self.rect.x - glow_size, self.rect.y - glow_size))
+        # Bordered highlight with optimal width/colors
+        border_width = 2 if (self.selected or self.hover) else 0
+        if border_width > 0:
+            # Border color priority: invalid > select > hover
+            if hasattr(self, "invalid") and self.invalid:
+                border_color = (220, 50, 50)  # Red for invalid (always highest priority)
+            elif self.selected:
+                border_color = (60, 180, 75)  # Green for select
+            elif self.hover:
+                border_color = (255, 215, 0)    # Vàng gold cho hover
+            else:
+                border_color = (70, 130, 180)
+            pygame.draw.rect(card_surface, border_color,
+                            (0, 0, self.width, self.height), border_width, border_radius=10)
         
         # Draw card on screen
         screen.blit(card_surface, self.rect.topleft)

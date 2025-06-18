@@ -28,8 +28,69 @@ class Player:
         self.hand.sort(key=lambda x: (Card.RANKS.index(x.rank), Card.SUITS.index(x.suit)))
         
     def get_selected_cards(self) -> List[Card]:
-        """Get all selected cards from player's hand"""
+        """Get all selected cards from player's hand."""
         return [card for card in self.hand if card.selected]
+
+    def update_invalid_states(self):
+        """Update each card's invalid state based on current selection"""
+        selected = [card for card in self.hand if card.selected]
+        valid = self.validate_selection(selected)
+        for card in self.hand:
+            card.invalid = card.selected and not valid
+
+    def validate_selection(self, selected: List["Card"]) -> bool:
+        """Improved validation with Tiến Lên rules"""
+        if not selected:
+            return False
+
+        from collections import Counter
+        n = len(selected)
+        ranks = [Card.RANKS.index(c.rank) for c in selected]
+        unique_ranks = set(ranks)
+
+        # Single card - always valid
+        if n == 1:
+            return True
+
+        # Pair/triple/quad - must be same rank
+        if n in (2, 3, 4) and len(unique_ranks) == 1:
+            return True
+
+        # Straight validation
+        if n >= 3:
+            # Must have unique ranks
+            if len(unique_ranks) != n:
+                return False
+
+            sorted_ranks = sorted(unique_ranks)
+            # Check consecutive ranks
+            if all(sorted_ranks[i] + 1 == sorted_ranks[i+1] for i in range(len(sorted_ranks)-1)):
+                # 2 can't be in the middle of straight
+                if Card.RANKS.index('2') in sorted_ranks[:-1]:
+                    return False
+                return True
+
+        # Pairs straight validation (đôi thông)
+        if n >= 6 and n % 2 == 0:
+            # Group cards by rank
+            rank_groups = {}
+            for card in selected:
+                rank_groups.setdefault(card.rank, []).append(card)
+
+            # Each rank must have exactly 2 cards
+            if not all(len(group) == 2 for group in rank_groups.values()):
+                return False
+
+            # Check consecutive ranks
+            sorted_ranks = sorted(rank_groups.keys(), key=lambda r: Card.RANKS.index(r))
+            rank_indices = [Card.RANKS.index(r) for r in sorted_ranks]
+            if all(rank_indices[i] + 1 == rank_indices[i+1] for i in range(len(rank_indices)-1)):
+                # 2 can't be in the middle of pairs straight
+                if '2' in sorted_ranks[:-1]:
+                    return False
+                return True
+
+        return False
         
     def clear_selection(self):
         """Clear all card selections"""
@@ -129,6 +190,7 @@ class Player:
             for card in sorted(self.hand, key=lambda c: c.z_index, reverse=True):
                 if card.rect.collidepoint(pos):
                     card.toggle_selected()
+                    self.update_invalid_states()
                     return True
         return False
         
@@ -137,97 +199,87 @@ class Player:
         if self.is_turn:
             for card in self.hand:
                 card.update_hover(mouse_pos)
+            self.update_invalid_states()
                 
     def can_play_cards(self, selected_cards: List[Card], last_played_cards: List[Card] = None) -> bool:
-        """Improved rules implementation"""
+        """Complete Tiến Lên rules implementation"""
         if not selected_cards:
             return False
-            
-        # Validate the combination
+
         combo_type = self.get_combo_type(selected_cards)
         if combo_type == "INVALID":
             return False
-            
+
         # First turn must include 3♠
         if not last_played_cards:
-            has_three_spades = any(card.rank == '3' and card.suit == 'spades' for card in selected_cards)
-            if not has_three_spades:
-                return False
-            return True
-            
-        # Get previous combo type
+            return any(card.rank == '3' and card.suit == 'spades' for card in selected_cards)
+
         prev_combo_type = self.get_combo_type(last_played_cards)
-        
-        # Special cases
+
+        # Special beating rules
         if prev_combo_type == "FOUR_OF_A_KIND":
             # Only higher four of a kind or pairs straight can beat
-            return combo_type in ["FOUR_OF_A_KIND", "PAIRS_STRAIGHT"] and \
-                   self.compare_combinations(selected_cards, last_played_cards) > 0
-                   
-        if prev_combo_type == "PAIRS_STRAIGHT":
+            if combo_type not in ["FOUR_OF_A_KIND", "PAIRS_STRAIGHT"]:
+                return False
+        elif prev_combo_type == "PAIRS_STRAIGHT":
             # Only higher pairs straight or four of a kind can beat
-            return combo_type in ["PAIRS_STRAIGHT", "FOUR_OF_A_KIND"] and \
-                   self.compare_combinations(selected_cards, last_played_cards) > 0
-                   
-        # Same combo type comparison
-        if combo_type == prev_combo_type:
-            return self.compare_combinations(selected_cards, last_played_cards) > 0
-                   
-        return False
+            if combo_type not in ["PAIRS_STRAIGHT", "FOUR_OF_A_KIND"]:
+                return False
+        elif combo_type != prev_combo_type:
+            # Different combo types not allowed
+            return False
+
+        # Compare same combo types
+        return self.compare_combinations(selected_cards, last_played_cards) > 0
         
     def get_combo_type(self, cards: List[Card]) -> str:
-        """Identify the combination type"""
+        """Improved combo identification"""
         if not cards:
             return "INVALID"
-            
-        # Sort cards by rank
-        sorted_cards = sorted(cards, key=lambda x: Card.RANKS.index(x.rank))
-        
+
+        from collections import Counter
+        n = len(cards)
+        rank_counts = Counter(c.rank for c in cards)
+        unique_ranks = set(rank_counts.keys())
+        rank_indices = sorted([Card.RANKS.index(r) for r in unique_ranks])
+
         # Single card
-        if len(cards) == 1:
+        if n == 1:
             return "SINGLE"
-            
-        # Get rank counts
-        rank_counts = {}
-        for card in cards:
-            rank_counts[card.rank] = rank_counts.get(card.rank, 0) + 1
-            
+
         # Pair
-        if len(cards) == 2 and len(rank_counts) == 1:
+        if n == 2 and len(unique_ranks) == 1:
             return "PAIR"
-            
+
         # Three of a kind
-        if len(cards) == 3 and len(rank_counts) == 1:
+        if n == 3 and len(unique_ranks) == 1:
             return "THREE"
-            
+
         # Four of a kind
-        if len(cards) == 4 and len(rank_counts) == 1:
+        if n == 4 and len(unique_ranks) == 1:
             return "FOUR_OF_A_KIND"
-            
-        # Straight (3+ consecutive cards)
-        if len(cards) >= 3:
-            ranks = [Card.RANKS.index(c.rank) for c in sorted_cards]
-            
-            # Check if consecutive and no 2 in the middle
-            if all(ranks[i] + 1 == ranks[i + 1] for i in range(len(ranks) - 1)):
-                # 2 can only be at the end
-                if any(r == Card.RANKS.index('2') for r in ranks[:-1]):
+
+        # Straight
+        if n >= 3:
+            # Check consecutive unique ranks
+            if (len(unique_ranks) == n and
+                all(rank_indices[i] + 1 == rank_indices[i+1] for i in range(len(rank_indices)-1))):
+                # 2 can't be in the middle
+                if Card.RANKS.index('2') in rank_indices[:-1]:
                     return "INVALID"
                 return "STRAIGHT"
-                
-        # Pairs straight (even number of cards, 4+)
-        if len(cards) >= 4 and len(cards) % 2 == 0:
-            # All ranks must have exactly 2 cards
+
+        # Pairs straight
+        if n >= 6 and n % 2 == 0:
+            # Each rank must have exactly 2 cards
             if all(count == 2 for count in rank_counts.values()):
-                sorted_ranks = sorted(rank_counts.keys(), key=lambda x: Card.RANKS.index(x))
-                rank_indices = [Card.RANKS.index(r) for r in sorted_ranks]
-                
-                # Check consecutive and no 2 in the middle
-                if all(rank_indices[i] + 1 == rank_indices[i + 1] for i in range(len(rank_indices) - 1)):
-                    if any(idx == Card.RANKS.index('2') for idx in rank_indices[:-1]):
+                # Check consecutive ranks
+                if all(rank_indices[i] + 1 == rank_indices[i+1] for i in range(len(rank_indices)-1)):
+                    # 2 can't be in the middle
+                    if Card.RANKS.index('2') in rank_indices[:-1]:
                         return "INVALID"
                     return "PAIRS_STRAIGHT"
-                    
+
         return "INVALID"
         
     def compare_combinations(self, cards1: List[Card], cards2: List[Card]) -> int:
