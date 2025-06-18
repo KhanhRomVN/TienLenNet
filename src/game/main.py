@@ -221,7 +221,18 @@ class TienLenGame:
                 player.passed = False
             self.last_played_cards = []
             self.center_cards = []
-        self.next_turn()
+            # Đúng luật: giữ nguyên người vừa đánh cuối, không xoay ghế,
+            # người vừa đánh được quyền ra bài mới, chỉ set lại is_turn đúng cho player[0]
+            self.current_player_index = 0
+            for i, player in enumerate(self.players):
+                player.is_turn = (i == 0)
+            return
+
+        # Nếu chưa đủ 3 người pass, mới xoay bàn như bình thường
+        self.rotate_players()
+        self.current_player_index = 0
+        for i, player in enumerate(self.players):
+            player.is_turn = (i == 0)
 
     def next_turn(self):
         self.players[self.current_player_index].is_turn = False
