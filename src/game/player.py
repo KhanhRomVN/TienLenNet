@@ -101,12 +101,37 @@ class Player:
             card.selected = False
             
     def draw_hand(self, screen, card_spacing=None):
-        """Draw the player's hand. Bottom: full hand. Others: 1 card back + number."""
+        """Draw hand and nice avatar+score for each player position, with compact card for non-bottom."""
         if not self.hand:
             return
 
-        # Only bottom show full hand, others show 1 card back + số
+        avatar_radius = 38
+        avatar_border = 3
+        score = 1000
+        # Number: 1 for Player 1, ..., so try get last char from name or fallback
+        try:
+            avatar_num = int(self.name.split()[-1])
+        except:
+            avatar_num = 1
+
+        def draw_avatar_and_score(x, y):
+            # Draw avatar circle
+            pygame.draw.circle(screen, (255, 255, 255), (x, y), avatar_radius)
+            pygame.draw.circle(screen, (0, 0, 0), (x, y), avatar_radius, avatar_border)
+            # Draw number
+            font_num = pygame.font.SysFont('Arial', 28, bold=True)
+            num_surf = font_num.render(str(avatar_num), True, (40, 40, 40))
+            screen.blit(num_surf, (x-num_surf.get_width()//2, y-num_surf.get_height()//2))
+            # Draw score below
+            font_score = pygame.font.SysFont('Arial', 18)
+            score_surf = font_score.render(str(score), True, (70, 130, 180))
+            screen.blit(score_surf, (x-score_surf.get_width()//2, y+avatar_radius+2))
+
+        # Adjusted bottom avatar position to be higher so score is not cut off
         if self.position == 'bottom':
+            avatar_x = 26 + avatar_radius
+            avatar_y = screen.get_height() - avatar_radius - 34  # moved up vs before!
+            draw_avatar_and_score(avatar_x, avatar_y)
             # --- Draw cards as before for bottom only ---
             self.z_index_counter = 0
             if card_spacing is None:
@@ -116,7 +141,6 @@ class Player:
             total_width = (len(self.hand) - 1) * card_spacing + Card.CARD_WIDTH
             start_x = (screen.get_width() - total_width) // 2
             y = screen.get_height() - Card.CARD_HEIGHT - 30
-            
             for i, card in enumerate(self.hand):
                 card.z_index = self.z_index_counter
                 x = start_x + i * card_spacing
@@ -124,36 +148,52 @@ class Player:
                 card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
                 self.z_index_counter += 1
         else:
-            # --- Minimalist for non-bottom positions ---
-            # Determine display coordinates per position
+            # --- Compact card size for non-bottom positions ---
             card_back_color = (255, 255, 255)
-            border_color = (200, 200, 200)
-            w, h = Card.CARD_WIDTH, Card.CARD_HEIGHT
-            font = pygame.font.SysFont('Arial', 28, bold=True)
+            border_color = (0, 0, 0)
+            card_scale = (avatar_radius * 2 + 12) / Card.CARD_HEIGHT
+            w = int(Card.CARD_WIDTH * card_scale)
+            h = int(Card.CARD_HEIGHT * card_scale)
+            font = pygame.font.SysFont('Arial', int(22*card_scale), bold=True)
+            avatar_gap = 12
 
             if self.position == 'top':
-                x = screen.get_width() // 2 - w // 2
-                y = 40
+                avatar_x = screen.get_width()//2 - w//2 - avatar_radius - avatar_gap
+                avatar_y = 40 + h//2
+                card_x = screen.get_width()//2 - w//2
+                card_y = 40
+                draw_avatar_and_score(avatar_x, avatar_y)
+                card_rect_pos = (card_x, card_y)
             elif self.position == 'left':
-                x = 50
-                y = screen.get_height() // 2 - h // 2
+                avatar_x = 28 + avatar_radius
+                avatar_y = screen.get_height()//2
+                card_x = avatar_x + avatar_radius + avatar_gap
+                card_y = avatar_y - h//2
+                draw_avatar_and_score(avatar_x, avatar_y)
+                card_rect_pos = (card_x, card_y)
             elif self.position == 'right':
-                x = screen.get_width() - w - 50
-                y = screen.get_height() // 2 - h // 2
+                avatar_x = screen.get_width() - (28 + avatar_radius)
+                avatar_y = screen.get_height()//2
+                card_x = avatar_x - avatar_radius - avatar_gap - w
+                card_y = avatar_y - h//2
+                draw_avatar_and_score(avatar_x, avatar_y)
+                card_rect_pos = (card_x, card_y)
             else:
-                x, y = 0, 0 # Fallback
-
+                avatar_x = 64 + avatar_radius
+                avatar_y = 40 + h//2
+                card_x = screen.get_width()//2 - w//2
+                card_y = 40
+                draw_avatar_and_score(avatar_x, avatar_y)
+                card_rect_pos = (card_x, card_y)
+            # Draw card back
             card_surf = pygame.Surface((w, h), pygame.SRCALPHA)
-            pygame.draw.rect(card_surf, card_back_color, (0, 0, w, h), border_radius=10)
-            pygame.draw.rect(card_surf, border_color, (0, 0, w, h), 2, border_radius=10)
-
-            # Draw the count in the center of the back
+            pygame.draw.rect(card_surf, card_back_color, (0, 0, w, h), border_radius=int(10*card_scale))
+            pygame.draw.rect(card_surf, border_color, (0, 0, w, h), 2, border_radius=int(10*card_scale))
             count_text = font.render(str(len(self.hand)), True, (100, 100, 100))
             tx = w//2 - count_text.get_width()//2
             ty = h//2 - count_text.get_height()//2
             card_surf.blit(count_text, (tx, ty))
-
-            screen.blit(card_surf, (x, y))
+            screen.blit(card_surf, card_rect_pos)
             return
             x = screen.get_width() - Card.CARD_WIDTH - 30
 
