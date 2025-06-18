@@ -270,7 +270,9 @@ class TienLenGame:
         if self.players[self.current_player_index].is_turn:
             current_player = self.players[self.current_player_index]
             selected_cards = current_player.get_selected_cards()
-            can_play = current_player.validate_selection(selected_cards)
+            # Cập nhật trạng thái bàn cho update_invalid_states/can_play_cards
+            current_player._last_played_cards = self.last_played_cards if self.last_played_cards else None
+            can_play = current_player.can_play_cards(selected_cards, self.last_played_cards)
             # Gray out button if move isn't valid
             if can_play:
                 play_color = (100, 200, 100)

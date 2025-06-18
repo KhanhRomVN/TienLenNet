@@ -34,7 +34,10 @@ class Player:
     def update_invalid_states(self):
         """Update each card's invalid state based on current selection"""
         selected = [card for card in self.hand if card.selected]
-        valid = self.validate_selection(selected)
+        # Lấy thông tin bàn (tối giản: truyền biến last_played_cards cho đúng nhất)
+        # Để tránh circular import, tạm giả sử dùng global access qua self._last_played_cards nếu được set
+        last_played = getattr(self, '_last_played_cards', None)
+        valid = self.can_play_cards(selected, last_played) if selected else False
         for card in self.hand:
             card.invalid = card.selected and not valid
 
