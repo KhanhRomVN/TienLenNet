@@ -101,24 +101,18 @@ class Player:
             card.selected = False
             
     def draw_hand(self, screen, card_spacing=None):
-        """Draw the player's hand at its fixed position. Always show current player's cards face-up."""
+        """Draw the player's hand. Bottom: full hand. Others: 1 card back + number."""
         if not self.hand:
             return
 
-        # Reset z-index counter
-        self.z_index_counter = 0
-
-        if card_spacing is None:
-            if self.position in ['bottom', 'top']:
+        # Only bottom show full hand, others show 1 card back + số
+        if self.position == 'bottom':
+            # --- Draw cards as before for bottom only ---
+            self.z_index_counter = 0
+            if card_spacing is None:
                 max_spacing = min(Card.CARD_WIDTH * 0.6,
                                 (screen.get_width() * 0.9) / len(self.hand))
                 card_spacing = max(Card.CARD_WIDTH * 0.3, max_spacing)
-            else:
-                max_spacing = min(Card.CARD_HEIGHT * 0.6,
-                                (screen.get_height() * 0.9) / len(self.hand))
-                card_spacing = max(Card.CARD_HEIGHT * 0.3, max_spacing)
-
-        if self.position == 'bottom':
             total_width = (len(self.hand) - 1) * card_spacing + Card.CARD_WIDTH
             start_x = (screen.get_width() - total_width) // 2
             y = screen.get_height() - Card.CARD_HEIGHT - 30
@@ -129,34 +123,38 @@ class Player:
                 card.face_up = self.is_turn
                 card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
                 self.z_index_counter += 1
+        else:
+            # --- Minimalist for non-bottom positions ---
+            # Determine display coordinates per position
+            card_back_color = (255, 255, 255)
+            border_color = (200, 200, 200)
+            w, h = Card.CARD_WIDTH, Card.CARD_HEIGHT
+            font = pygame.font.SysFont('Arial', 28, bold=True)
 
-        elif self.position == 'top':
-            total_width = (len(self.hand) - 1) * card_spacing + Card.CARD_WIDTH
-            start_x = (screen.get_width() - total_width) // 2
-            y = 30
+            if self.position == 'top':
+                x = screen.get_width() // 2 - w // 2
+                y = 40
+            elif self.position == 'left':
+                x = 50
+                y = screen.get_height() // 2 - h // 2
+            elif self.position == 'right':
+                x = screen.get_width() - w - 50
+                y = screen.get_height() // 2 - h // 2
+            else:
+                x, y = 0, 0 # Fallback
 
-            for i, card in enumerate(self.hand):
-                card.z_index = self.z_index_counter
-                x = start_x + i * card_spacing
-                card.face_up = self.is_turn
-                card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
-                self.z_index_counter += 1
+            card_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+            pygame.draw.rect(card_surf, card_back_color, (0, 0, w, h), border_radius=10)
+            pygame.draw.rect(card_surf, border_color, (0, 0, w, h), 2, border_radius=10)
 
-        elif self.position == 'left':
-            total_height = (len(self.hand) - 1) * card_spacing + Card.CARD_HEIGHT
-            start_y = (screen.get_height() - total_height) // 2
-            x = 30
+            # Draw the count in the center of the back
+            count_text = font.render(str(len(self.hand)), True, (100, 100, 100))
+            tx = w//2 - count_text.get_width()//2
+            ty = h//2 - count_text.get_height()//2
+            card_surf.blit(count_text, (tx, ty))
 
-            for i, card in enumerate(self.hand):
-                card.z_index = self.z_index_counter
-                y = start_y + i * card_spacing
-                card.face_up = self.is_turn
-                card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
-                self.z_index_counter += 1
-
-        elif self.position == 'right':
-            total_height = (len(self.hand) - 1) * card_spacing + Card.CARD_HEIGHT
-            start_y = (screen.get_height() - total_height) // 2
+            screen.blit(card_surf, (x, y))
+            return
             x = screen.get_width() - Card.CARD_WIDTH - 30
 
             for i, card in enumerate(self.hand):

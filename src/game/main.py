@@ -258,15 +258,7 @@ class TienLenGame:
         pygame.display.flip()
 
     def draw_ui(self):
-        title = self.title_font.render("TIẾN LÊN", True, UI.ACCENT_COLOR)
-        self.screen.blit(title, (20, 20))
-        turn_text = self.font.render(f"Current turn: {self.players[self.current_player_index].name}", True, UI.TEXT_COLOR)
-        self.screen.blit(turn_text, (20, 70))
-        if self.last_played_cards:
-            last_play_text = self.font.render(
-                f"Last played by {self.players[self.last_played_by].name}: {len(self.last_played_cards)} cards", True, UI.TEXT_COLOR
-            )
-            self.screen.blit(last_play_text, (20, 100))
+        # UI tối giản, không hiển thị title, current turn, last played, player name các góc nữa
         if self.players[self.current_player_index].is_turn:
             current_player = self.players[self.current_player_index]
             selected_cards = current_player.get_selected_cards()
