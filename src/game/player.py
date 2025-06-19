@@ -3,140 +3,297 @@ from .card import Card
 import pygame
 
 class Player:
-    def __init__(self, name: str, position: str):
+    def __init__(self, name: str, position: str, is_ai=False):
         self.name = name
         self.position = position  # 'bottom', 'left', 'top', 'right'
         self.hand: List[Card] = []
         self.is_turn = False
-        self.passed = False  # Track if player passed their turn
-        # Track z-index for overlapping cards
+        self.passed = False
         self.z_index_counter = 0
-        
+        self.is_ai = is_ai  # AI flag
+
+        # RL reward system variables
+        self.score = 0  # Số điểm hiện tại
+        self.move_count = 0
+        self.cards_at_start = 13
+        self.high_cards_played = 0
+        self.bombs_used = 0
+        self.consecutive_passes_forced = 0
+        self.low_cards_played_early = 0
+        self.invalid_moves = 0
+        self.cards_lost = 0
+        self.last_move_type = None
+        self.consecutive_pass_count = 0
+
     def add_card(self, card: Card):
-        """Add a card to player's hand"""
         self.hand.append(card)
         self.sort_hand()
-        
+
     def remove_cards(self, cards: List[Card]):
-        """Remove cards from player's hand"""
         for card in cards:
             if card in self.hand:
                 self.hand.remove(card)
-                
+        self.cards_lost += len(cards)
+
     def sort_hand(self):
-        """Sort cards with proper suit order"""
         self.hand.sort(key=lambda x: (Card.RANKS.index(x.rank), Card.SUITS.index(x.suit)))
-        
+
     def get_selected_cards(self) -> List[Card]:
-        """Get all selected cards from player's hand."""
         return [card for card in self.hand if card.selected]
 
     def update_invalid_states(self):
-        """Update each card's invalid state based on current selection"""
         selected = [card for card in self.hand if card.selected]
-        # Lấy thông tin bàn (tối giản: truyền biến last_played_cards cho đúng nhất)
-        # Để tránh circular import, tạm giả sử dùng global access qua self._last_played_cards nếu được set
         last_played = getattr(self, '_last_played_cards', None)
         valid = self.can_play_cards(selected, last_played) if selected else False
         for card in self.hand:
             card.invalid = card.selected and not valid
 
+    def clear_selection(self):
+        for card in self.hand:
+            card.selected = False
+
+    # RL Reward functions -----------------------------
+    def add_reward(self, value, reason=""):
+        # Hệ số thưởng/phạt nâng cao:
+        multiplier = 1.0
+        # Nếu gần hết bài
+        if len(self.hand) <= 3:
+            multiplier = 2.0
+        # "Phục hồi thế cờ" — vừa mất ≥5 bài mà còn ≤5 lá
+        elif self.cards_lost >= 5 and len(self.hand) <= 5:
+            multiplier = 1.5
+        self.score += value * multiplier
+        print(f"[REWARD] {self.name}: {value:.2f} x {multiplier:.1f} = {value * multiplier:.2f}   ({reason})")
+
+    def update_after_move(self, cards_played):
+        self.move_count += 1
+        if cards_played:
+            self.add_reward(0.2 * len(cards_played), "Chơi bài hợp lệ")
+            if len(cards_played) == 1:
+                self.add_reward(0.3, "Thoát bài khó")
+            if getattr(self, "last_played_by", None) is None and len(cards_played) <= 2:
+                self.add_reward(0.8, "Dẫn đầu bằng combo nhỏ")
+        high_ranks = ['2', 'A', 'K']
+        for card in cards_played or []:
+            if card.rank in high_ranks:
+                self.high_cards_played += 1
+                if self.move_count <= 5:
+                    self.add_reward(-1.0, "Lãng phí bài cao sớm")
+        low_ranks = ['3', '4', '5', '6', '7']
+        for card in cards_played or []:
+            if card.rank in low_ranks and self.move_count <= 10:
+                self.low_cards_played_early += 1
+                self.add_reward(0.2, "Thoát bài thấp sớm")
+        self.consecutive_pass_count = 0
+
+        # Layer reward: tích hợp phần thưởng chiến thuật/multi-objective
+        self.update_strategy_rewards()
+
+    def update_after_pass(self):
+        self.consecutive_pass_count += 1
+        if self.consecutive_pass_count >= 3:
+            self.add_reward(-0.2, "Bế tắc")
+
+    def update_after_block(self, success=True):
+        if success:
+            self.add_reward(2.0, "Chặn thành công")
+        else:
+            self.add_reward(-1.5, "Bị chặn")
+
+    def update_strategy_rewards(self):
+        # --- Các tín hiệu chiến thuật reward theo REWARD.md ---
+        # Giảm 50% bài
+        if len(self.hand) <= 6 and self.cards_at_start == 13:
+            self.add_reward(8.0, "Giảm 50% số bài")
+            self.cards_at_start = len(self.hand)
+        high_ranks = ['2', 'A', 'K']
+        # Giữ bài cao đến cuối
+        if len(self.hand) <= 5 and any(card.rank in high_ranks for card in self.hand):
+            self.add_reward(0.5, "Giữ bài cao đến cuối")
+        # Tích lũy combo tiềm năng
+        if self.count_available_combos() >= 3:
+            self.add_reward(0.3, "Tích lũy combo tiềm năng")
+        # Tiết kiệm bài cao
+        if self.saved_high_card():
+            self.add_reward(0.4, "Tiết kiệm bài cao")
+        # Mắc kẹt bài lẻ
+        if self.count_orphan_cards() >= 3:
+            self.add_reward(-0.7, "Mắc kẹt bài lẻ")
+        # Tối ưu hóa sảnh
+        if self.created_long_sequence():
+            self.add_reward(0.6, "Tối ưu hóa sảnh")
+        # Thưởng phá vỡ bế tắc
+        if self.consecutive_pass_count >= 2:
+            self.add_reward(0.5, "Phá vỡ bế tắc")
+        # Thưởng tạo combo dài liên tục
+        if self.created_long_sequence():
+            self.add_reward(0.8, "Tạo combo dài")
+        # Phạt giữ bài cao khi còn nhiều bài
+        if len(self.hand) >= 8 and any(card.rank in high_ranks for card in self.hand):
+            self.add_reward(-0.3, "Giữ bài cao không cần thiết")
+
+
+    def count_available_combos(self):
+        return 2
+    def count_orphan_cards(self):
+        return 0
+    def saved_high_card(self):
+        return False
+    def created_long_sequence(self):
+        return False
+
+    # ---------------- Gameplay/core logic -----------------
     def validate_selection(self, selected: List["Card"]) -> bool:
-        """Improved validation with Tiến Lên rules"""
         if not selected:
             return False
-
         from collections import Counter
         n = len(selected)
         ranks = [Card.RANKS.index(c.rank) for c in selected]
         unique_ranks = set(ranks)
-
-        # Single card - always valid
-        if n == 1:
-            return True
-
-        # Pair/triple/quad - must be same rank
-        if n in (2, 3, 4) and len(unique_ranks) == 1:
-            return True
-
-        # Straight validation
+        # Single card
+        if n == 1: return True
+        # Pair/triple/quad
+        if n in (2, 3, 4) and len(unique_ranks) == 1: return True
+        # Straight
         if n >= 3:
-            # Must have unique ranks
-            if len(unique_ranks) != n:
-                return False
-
+            if len(unique_ranks) != n: return False
             sorted_ranks = sorted(unique_ranks)
-            # Check consecutive ranks
-            if all(sorted_ranks[i] + 1 == sorted_ranks[i+1] for i in range(len(sorted_ranks)-1)):
-                # 2 can't be in the middle of straight
+            if all(sorted_ranks[i]+1==sorted_ranks[i+1] for i in range(n-1)):
                 if Card.RANKS.index('2') in sorted_ranks[:-1]:
                     return False
                 return True
-
-        # Pairs straight validation (đôi thông)
+        # Pairs straight (đôi thông)
         if n >= 6 and n % 2 == 0:
-            # Group cards by rank
             rank_groups = {}
             for card in selected:
                 rank_groups.setdefault(card.rank, []).append(card)
-
-            # Each rank must have exactly 2 cards
             if not all(len(group) == 2 for group in rank_groups.values()):
                 return False
-
-            # Check consecutive ranks
             sorted_ranks = sorted(rank_groups.keys(), key=lambda r: Card.RANKS.index(r))
             rank_indices = [Card.RANKS.index(r) for r in sorted_ranks]
-            if all(rank_indices[i] + 1 == rank_indices[i+1] for i in range(len(rank_indices)-1)):
-                # 2 can't be in the middle of pairs straight
+            if all(rank_indices[i]+1==rank_indices[i+1] for i in range(len(rank_indices)-1)):
                 if '2' in sorted_ranks[:-1]:
                     return False
                 return True
-
         return False
-        
-    def clear_selection(self):
-        """Clear all card selections"""
-        for card in self.hand:
-            card.selected = False
-            
-    def draw_hand(self, screen, card_spacing=None):
-        """Draw hand and nice avatar+score for each player position, with compact card for non-bottom."""
-        if not self.hand:
-            return
 
+    def can_play_cards(self, selected_cards: List[Card], last_played_cards: List[Card] = None) -> bool:
+        if not selected_cards:
+            return False
+        combo_type = self.get_combo_type(selected_cards)
+        if combo_type == "INVALID":
+            return False
+        # First turn must include 3♠
+        if not last_played_cards:
+            return any(card.rank == '3' and card.suit == 'spades' for card in selected_cards)
+        prev_combo_type = self.get_combo_type(last_played_cards)
+        # Special beating rules
+        if prev_combo_type == "FOUR_OF_A_KIND":
+            if combo_type not in ["FOUR_OF_A_KIND", "PAIRS_STRAIGHT"]:
+                return False
+        elif prev_combo_type == "PAIRS_STRAIGHT":
+            if combo_type not in ["PAIRS_STRAIGHT", "FOUR_OF_A_KIND"]:
+                return False
+        elif combo_type != prev_combo_type:
+            return False
+        return self.compare_combinations(selected_cards, last_played_cards) > 0
+
+    def get_combo_type(self, cards: List[Card]) -> str:
+        if not cards: return "INVALID"
+        from collections import Counter
+        n = len(cards)
+        rank_counts = Counter(c.rank for c in cards)
+        unique_ranks = set(rank_counts.keys())
+        rank_indices = sorted([Card.RANKS.index(r) for r in unique_ranks])
+        if n == 1: return "SINGLE"
+        if n == 2 and len(unique_ranks) == 1: return "PAIR"
+        if n == 3 and len(unique_ranks) == 1: return "THREE"
+        if n == 4 and len(unique_ranks) == 1: return "FOUR_OF_A_KIND"
+        if n >= 3:
+            if (len(unique_ranks) == n and all(rank_indices[i]+1==rank_indices[i+1] for i in range(len(rank_indices)-1))):
+                if Card.RANKS.index('2') in rank_indices[:-1]:
+                    return "INVALID"
+                return "STRAIGHT"
+        if n >= 6 and n % 2 == 0:
+            if all(count == 2 for count in rank_counts.values()):
+                if all(rank_indices[i]+1==rank_indices[i+1] for i in range(len(rank_indices)-1)):
+                    if Card.RANKS.index('2') in rank_indices[:-1]:
+                        return "INVALID"
+                    return "PAIRS_STRAIGHT"
+        return "INVALID"
+
+    def compare_combinations(self, cards1: List[Card], cards2: List[Card]) -> int:
+        if len(cards1) in [1, 2, 3]:
+            max1 = max(cards1)
+            max2 = max(cards2)
+            if Card.RANKS.index(max1.rank) > Card.RANKS.index(max2.rank):
+                return 1
+            elif Card.RANKS.index(max1.rank) < Card.RANKS.index(max2.rank):
+                return -1
+            return 1 if Card.SUITS.index(max1.suit) > Card.SUITS.index(max2.suit) else -1
+        if len(cards1) >= 3:
+            max1 = max(cards1)
+            max2 = max(cards2)
+            if Card.RANKS.index(max1.rank) > Card.RANKS.index(max2.rank):
+                return 1
+            elif Card.RANKS.index(max1.rank) < Card.RANKS.index(max2.rank):
+                return -1
+            return 1 if Card.SUITS.index(max1.suit) > Card.SUITS.index(max2.suit) else -1
+        if len(cards1) == 4:
+            rank1 = cards1[0].rank
+            rank2 = cards2[0].rank
+            return 1 if Card.RANKS.index(rank1) > Card.RANKS.index(rank2) else -1
+        return 0
+
+    # UI/interaction -------------
+    def handle_click(self, pos):
+        print(f"[DEBUG] handle_click called with pos={pos}, is_turn={self.is_turn}, passed={self.passed}, is_ai={getattr(self, 'is_ai', False)}")
+        if self.is_turn and not self.passed and not getattr(self, 'is_ai', False):
+            for card in sorted(self.hand, key=lambda c: c.z_index, reverse=True):
+                if card.rect.collidepoint(pos):
+                    print(f"[DEBUG] Card {card} was clicked! rect={card.rect} pos={pos}")
+                    card.toggle_selected()
+                    self.update_invalid_states()
+                    return True
+        return False
+
+    def update_hover(self, mouse_pos):
+        if self.is_turn:
+            for card in self.hand:
+                card.update_hover(mouse_pos)
+            self.update_invalid_states()
+
+    def draw_hand(self, screen, card_spacing=None):
+        if not self.hand: return
         avatar_radius = 38
         avatar_border = 3
-        score = 1000
-        # Number: 1 for Player 1, ..., so try get last char from name or fallback
+        score_value = int(self.score)
         try:
             avatar_num = int(self.name.split()[-1])
         except:
             avatar_num = 1
 
         def draw_avatar_and_score(x, y):
-            # Draw avatar circle
+            # Border đỏ khi là AI (chỉ nổi bật trong mode 1_AI_3_Humans)
+            is_ai_highlight = getattr(self, 'is_ai', False)
             pygame.draw.circle(screen, (255, 255, 255), (x, y), avatar_radius)
+            if is_ai_highlight:
+                pygame.draw.circle(screen, (220, 30, 30), (x, y), avatar_radius+3, 5)  # border đỏ nổi bật hơn
             pygame.draw.circle(screen, (0, 0, 0), (x, y), avatar_radius, avatar_border)
-            # Draw number
             font_num = pygame.font.SysFont('Arial', 28, bold=True)
             num_surf = font_num.render(str(avatar_num), True, (40, 40, 40))
             screen.blit(num_surf, (x-num_surf.get_width()//2, y-num_surf.get_height()//2))
-            # Draw score below
             font_score = pygame.font.SysFont('Arial', 18)
-            score_surf = font_score.render(str(score), True, (70, 130, 180))
+            score_surf = font_score.render(str(score_value), True, (70, 130, 180))
             screen.blit(score_surf, (x-score_surf.get_width()//2, y+avatar_radius+2))
 
-        # Adjusted bottom avatar position to be higher so score is not cut off
         if self.position == 'bottom':
             avatar_x = 26 + avatar_radius
-            avatar_y = screen.get_height() - avatar_radius - 34  # moved up vs before!
+            avatar_y = screen.get_height() - avatar_radius - 34
             draw_avatar_and_score(avatar_x, avatar_y)
-            # --- Draw cards as before for bottom only ---
             self.z_index_counter = 0
             if card_spacing is None:
-                max_spacing = min(Card.CARD_WIDTH * 0.6,
-                                (screen.get_width() * 0.9) / len(self.hand))
+                max_spacing = min(Card.CARD_WIDTH * 0.6, (screen.get_width() * 0.9) / len(self.hand))
                 card_spacing = max(Card.CARD_WIDTH * 0.3, max_spacing)
             total_width = (len(self.hand) - 1) * card_spacing + Card.CARD_WIDTH
             start_x = (screen.get_width() - total_width) // 2
@@ -148,7 +305,6 @@ class Player:
                 card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
                 self.z_index_counter += 1
         else:
-            # --- Compact card size for non-bottom positions ---
             card_back_color = (255, 255, 255)
             border_color = (0, 0, 0)
             card_scale = (avatar_radius * 2 + 12) / Card.CARD_HEIGHT
@@ -185,7 +341,6 @@ class Player:
                 card_y = 40
                 draw_avatar_and_score(avatar_x, avatar_y)
                 card_rect_pos = (card_x, card_y)
-            # Draw card back
             card_surf = pygame.Surface((w, h), pygame.SRCALPHA)
             pygame.draw.rect(card_surf, card_back_color, (0, 0, w, h), border_radius=int(10*card_scale))
             pygame.draw.rect(card_surf, border_color, (0, 0, w, h), 2, border_radius=int(10*card_scale))
@@ -195,167 +350,3 @@ class Player:
             card_surf.blit(count_text, (tx, ty))
             screen.blit(card_surf, card_rect_pos)
             return
-            x = screen.get_width() - Card.CARD_WIDTH - 30
-
-            for i, card in enumerate(self.hand):
-                card.z_index = self.z_index_counter
-                y = start_y + i * card_spacing
-                card.face_up = self.is_turn
-                card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
-                self.z_index_counter += 1
-        
-        # Draw player name with modern styling
-        font = pygame.font.SysFont('Arial', 24)
-        status = " (Turn)" if self.is_turn else " (Passed)" if self.passed else ""
-        name_text = f"{self.name}{status}"
-        text_color = (50, 120, 200) if self.is_turn else (150, 150, 150) if self.passed else (80, 80, 80)
-        text = font.render(name_text, True, text_color)
-        
-        if self.position == 'bottom':
-            text_rect = text.get_rect(center=(screen.get_width()//2, screen.get_height() - 10))
-        elif self.position == 'top':
-            text_rect = text.get_rect(center=(screen.get_width()//2, 20))
-        elif self.position == 'left':
-            text_rect = text.get_rect(center=(50, screen.get_height()//2))
-            text = pygame.transform.rotate(text, 90)
-        else:  # right
-            text_rect = text.get_rect(center=(screen.get_width() - 50, screen.get_height()//2))
-            text = pygame.transform.rotate(text, -90)
-            
-        screen.blit(text, text_rect)
-                
-    def handle_click(self, pos):
-        """Handle mouse click with z-index priority for current player"""
-        if self.is_turn and not self.passed:
-            # Check cards from highest z-index (topmost) to lowest
-            for card in sorted(self.hand, key=lambda c: c.z_index, reverse=True):
-                if card.rect.collidepoint(pos):
-                    card.toggle_selected()
-                    self.update_invalid_states()
-                    return True
-        return False
-        
-    def update_hover(self, mouse_pos):
-        """Update hover state for cards of current player"""
-        if self.is_turn:
-            for card in self.hand:
-                card.update_hover(mouse_pos)
-            self.update_invalid_states()
-                
-    def can_play_cards(self, selected_cards: List[Card], last_played_cards: List[Card] = None) -> bool:
-        """Complete Tiến Lên rules implementation"""
-        if not selected_cards:
-            return False
-
-        combo_type = self.get_combo_type(selected_cards)
-        if combo_type == "INVALID":
-            return False
-
-        # First turn must include 3♠
-        if not last_played_cards:
-            return any(card.rank == '3' and card.suit == 'spades' for card in selected_cards)
-
-        prev_combo_type = self.get_combo_type(last_played_cards)
-
-        # Special beating rules
-        if prev_combo_type == "FOUR_OF_A_KIND":
-            # Only higher four of a kind or pairs straight can beat
-            if combo_type not in ["FOUR_OF_A_KIND", "PAIRS_STRAIGHT"]:
-                return False
-        elif prev_combo_type == "PAIRS_STRAIGHT":
-            # Only higher pairs straight or four of a kind can beat
-            if combo_type not in ["PAIRS_STRAIGHT", "FOUR_OF_A_KIND"]:
-                return False
-        elif combo_type != prev_combo_type:
-            # Different combo types not allowed
-            return False
-
-        # Compare same combo types
-        return self.compare_combinations(selected_cards, last_played_cards) > 0
-        
-    def get_combo_type(self, cards: List[Card]) -> str:
-        """Improved combo identification"""
-        if not cards:
-            return "INVALID"
-
-        from collections import Counter
-        n = len(cards)
-        rank_counts = Counter(c.rank for c in cards)
-        unique_ranks = set(rank_counts.keys())
-        rank_indices = sorted([Card.RANKS.index(r) for r in unique_ranks])
-
-        # Single card
-        if n == 1:
-            return "SINGLE"
-
-        # Pair
-        if n == 2 and len(unique_ranks) == 1:
-            return "PAIR"
-
-        # Three of a kind
-        if n == 3 and len(unique_ranks) == 1:
-            return "THREE"
-
-        # Four of a kind
-        if n == 4 and len(unique_ranks) == 1:
-            return "FOUR_OF_A_KIND"
-
-        # Straight
-        if n >= 3:
-            # Check consecutive unique ranks
-            if (len(unique_ranks) == n and
-                all(rank_indices[i] + 1 == rank_indices[i+1] for i in range(len(rank_indices)-1))):
-                # 2 can't be in the middle
-                if Card.RANKS.index('2') in rank_indices[:-1]:
-                    return "INVALID"
-                return "STRAIGHT"
-
-        # Pairs straight
-        if n >= 6 and n % 2 == 0:
-            # Each rank must have exactly 2 cards
-            if all(count == 2 for count in rank_counts.values()):
-                # Check consecutive ranks
-                if all(rank_indices[i] + 1 == rank_indices[i+1] for i in range(len(rank_indices)-1)):
-                    # 2 can't be in the middle
-                    if Card.RANKS.index('2') in rank_indices[:-1]:
-                        return "INVALID"
-                    return "PAIRS_STRAIGHT"
-
-        return "INVALID"
-        
-    def compare_combinations(self, cards1: List[Card], cards2: List[Card]) -> int:
-        """Compare two combinations of the same type"""
-        # For singles, pairs, three of a kind - compare highest card
-        if len(cards1) in [1, 2, 3]:
-            max1 = max(cards1)
-            max2 = max(cards2)
-            
-            # Compare ranks first
-            if Card.RANKS.index(max1.rank) > Card.RANKS.index(max2.rank):
-                return 1
-            elif Card.RANKS.index(max1.rank) < Card.RANKS.index(max2.rank):
-                return -1
-                
-            # If same rank, compare suits
-            return 1 if Card.SUITS.index(max1.suit) > Card.SUITS.index(max2.suit) else -1
-            
-        # For straights and pairs straights - compare by highest card
-        if len(cards1) >= 3:
-            max1 = max(cards1)
-            max2 = max(cards2)
-            
-            if Card.RANKS.index(max1.rank) > Card.RANKS.index(max2.rank):
-                return 1
-            elif Card.RANKS.index(max1.rank) < Card.RANKS.index(max2.rank):
-                return -1
-                
-            # For straights with same highest card, compare suit of highest card
-            return 1 if Card.SUITS.index(max1.suit) > Card.SUITS.index(max2.suit) else -1
-            
-        # For four of a kind - compare rank
-        if len(cards1) == 4:
-            rank1 = cards1[0].rank
-            rank2 = cards2[0].rank
-            return 1 if Card.RANKS.index(rank1) > Card.RANKS.index(rank2) else -1
-            
-        return 0

@@ -50,3 +50,4 @@ tien_len_rl/
 ````
 
 python3 -m src.game.main
+python src/ai/test_agent_actions.py

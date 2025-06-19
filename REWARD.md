@@ -1,5 +1,3 @@
-Dưới đây là hệ thống phần thưởng tối ưu cho RL Agent trong game bài Tá Lả, được thiết kế chi tiết với 3 cấp độ phần thưởng dày đặc để hướng dẫn agent học chiến thuật hiệu quả:
-
 ````markdown
 # 🏆 Hệ Thống Phần Thưởng Tối Ưu
 

@@ -14,11 +14,13 @@ class GameLogic:
 
     @staticmethod
     def find_starting_player(players):
-        """Find the player with 3♠ to start the game"""
+        """Find the player with 3♠ to start the game, add debug log"""
         for i, player in enumerate(players):
-            for card in player.hand:
-                if card.rank == '3' and card.suit == 'spades':
-                    return i
+            found = any(card.rank == '3' and card.suit == 'spades' for card in player.hand)
+            if found:
+                print(f"[FIND_STARTER] Player {i} has 3♠")
+                return i
+        print("[FIND_STARTER] No 3♠ found, using player 0 as fallback")
         return 0  # fallback
 
     @staticmethod
