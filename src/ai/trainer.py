@@ -1,6 +1,7 @@
 import numpy as np
 from .agent import AIAgent
 from src.game.main import TienLenGame
+from .human_dataset import HumanDemonstrationDataset, pretrain_with_human_data
 
 class Trainer:
     def __init__(self):
@@ -10,6 +11,13 @@ class Trainer:
         self.episodes = 10000
         self.batch_size = 64
         self.update_target_every = 100
+def pretrain_from_human_logs(self, game_records, epochs=50):
+        """
+        Huấn luyện sơ bộ agent từ dữ liệu người chơi thật (Giai đoạn 1)
+        game_records: list các log dạng {'state': ..., 'action_id': ...}
+        """
+        dataset = HumanDemonstrationDataset(game_records, encode_state_func=lambda s: self.agent.state_encoder.encode_from_log(s))
+        pretrain_with_human_data(self.agent, dataset, self.agent.device, epochs=epochs)
 
     def train(self):
         for episode in range(self.episodes):
@@ -64,6 +72,10 @@ class Trainer:
         player = self.game.players[0]
         prev_score = player.score
 
+        total_moves = getattr(self, "total_moves", 0)
+        if not hasattr(self, "explored_combos"):
+            self.explored_combos = set()
+
         if action == "PASS":
             self.game.pass_turn()
         else:
@@ -71,16 +83,18 @@ class Trainer:
             for card in player.hand:
                 card.selected = card in (action if isinstance(action, list) else [])
             self.game.play_cards()
-            # Tích hợp reward tức thời khi chơi bài thật sự
             selected_count = len([c for c in player.hand if c.selected])
+            # Không dùng reward cứng, thay bằng get_dynamic_reward cho chiến lược thông minh hơn
             if selected_count > 0:
-                player.add_reward(0.2 * selected_count, "Chơi bài hợp lệ")
+                base_reward = player.get_dynamic_reward(action, self.game, total_moves=total_moves, explored_combos=self.explored_combos)
+                player.add_reward(base_reward, "Dynamic combo reward")
                 if selected_count == 1:
                     player.add_reward(0.3, "Thoát bài khó")
             # Chiến thuật layer
             player.update_strategy_rewards()
 
         reward = player.score - prev_score
+        self.total_moves = total_moves + 1
         done = self.game.round_starter is None  # Game kết thúc hoặc sang ván mới
 
         return reward, done

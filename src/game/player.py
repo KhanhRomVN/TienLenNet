@@ -3,7 +3,8 @@ from .card import Card
 import pygame
 
 class Player:
-    def __init__(self, name: str, position: str, is_ai=False):
+    def __init__(self, id: str, name: str, position: str, is_ai=False):
+        self.id = id
         self.name = name
         self.position = position  # 'bottom', 'left', 'top', 'right'
         self.hand: List[Card] = []
@@ -41,10 +42,20 @@ class Player:
     def get_selected_cards(self) -> List[Card]:
         return [card for card in self.hand if card.selected]
 
-    def update_invalid_states(self):
+    def update_invalid_states(self, last_played_cards=None, game_first_turn=False):
+        """
+        Validate selected combo, set card.invalid for each card;
+        - game_first_turn: first turn of first game (requires 3♠ if no card on table)
+        """
         selected = [card for card in self.hand if card.selected]
-        last_played = getattr(self, '_last_played_cards', None)
-        valid = self.can_play_cards(selected, last_played) if selected else False
+        if last_played_cards is None:
+            last_played_cards = getattr(self, '_last_played_cards', None)
+        valid = False
+        if selected:
+            if game_first_turn and not last_played_cards:
+                valid = any(card.rank == '3' and card.suit == 'spades' for card in selected)
+            else:
+                valid = self.can_play_cards(selected, last_played_cards)
         for card in self.hand:
             card.invalid = card.selected and not valid
 
@@ -52,11 +63,49 @@ class Player:
         for card in self.hand:
             card.selected = False
 
+    def reset_state(self):
+        self.passed = False
+        self.clear_selection()
+
     # RL Reward functions -----------------------------
     def add_reward(self, value, reason=""):
         # Hệ số thưởng/phạt nâng cao:
         multiplier = 1.0
         # Nếu gần hết bài
+    def get_dynamic_reward(self, action, game_state, total_moves=0, explored_combos=None):
+        """
+        Tặng thưởng/phạt linh hoạt cho AI tùy tình huống game và giai đoạn học
+        """
+        base_reward = self.calculate_base_reward(action)
+        explored_combos = explored_combos or set()
+
+        # Bước 1: Thưởng cho đánh bài sớm/làm chủ – giai đoạn học vỡ lòng
+        if total_moves < 100:
+            if action != "PASS":
+                base_reward += 0.5 * (len(action) if isinstance(action, list) else 1)
+            else:
+                base_reward -= 0.3
+
+        # Bước 2: Thưởng nếu đánh ra loại combo mới với AI
+        if hasattr(self, "combo_history"):
+            combo_key = tuple(sorted([(c.rank, c.suit) for c in action])) if isinstance(action, list) else tuple()
+            if combo_key and combo_key not in self.combo_history:
+                base_reward += 1.0
+                self.combo_history.add(combo_key)
+        if explored_combos and isinstance(action, list):
+            combo_key = tuple(sorted([(c.rank, c.suit) for c in action]))
+            if combo_key not in explored_combos:
+                base_reward += 1.0
+                explored_combos.add(combo_key)
+        
+        return base_reward
+
+    def calculate_base_reward(self, action):
+        # Hưởng cơ bản: có thể tăng cường logic recognition
+        # Đánh bài được thưởng, pass bị phạt nhẹ
+        if action == "PASS":
+            return -0.1
+        return 0.2 * (len(action) if isinstance(action, list) else 1)
         if len(self.hand) <= 3:
             multiplier = 2.0
         # "Phục hồi thế cờ" — vừa mất ≥5 bài mà còn ≤5 lá
@@ -99,6 +148,7 @@ class Player:
             self.add_reward(2.0, "Chặn thành công")
         else:
             self.add_reward(-1.5, "Bị chặn")
+        print(f"Player {self.id} {'chặn thành công' if success else 'bị chặn'}")
 
     def update_strategy_rewards(self):
         # --- Các tín hiệu chiến thuật reward theo REWARD.md ---
@@ -144,12 +194,30 @@ class Player:
 
     # ---------------- Gameplay/core logic -----------------
     def validate_selection(self, selected: List["Card"]) -> bool:
+        """
+        Kiểm tra sự hợp lệ của bộ bài được chọn, PHẢI xét luôn luật chặn: nếu trên bàn đã ra sảnh hay đôi,
+        phải bắt buộc lớn hơn, cùng số lá, đúng loại combo, đúng chất với sảnh nếu cùng loại.
+        """
         if not selected:
             return False
         from collections import Counter
         n = len(selected)
         ranks = [Card.RANKS.index(c.rank) for c in selected]
         unique_ranks = set(ranks)
+
+        # Nếu đang phải chặn sảnh hoặc combo đặc biệt, phải sử dụng can_play_cards để chuẩn
+        try:
+            from src.game.main import TienLenGame
+        except ImportError:
+            TienLenGame = None
+
+        # Tìm context bàn hiện tại (nếu có tham chiếu _last_played_cards)
+        last_played = getattr(self, '_last_played_cards', None)
+
+        # Nếu trên bàn đã có combo, kiểm tra luôn bằng can_play_cards (sẽ so sánh luật chặn chuẩn)
+        if last_played:
+            return self.can_play_cards(selected, last_played)
+        
         # Single card
         if n == 1: return True
         # Pair/triple/quad
@@ -180,12 +248,15 @@ class Player:
     def can_play_cards(self, selected_cards: List[Card], last_played_cards: List[Card] = None) -> bool:
         if not selected_cards:
             return False
+
+        # Kiểm tra combo hợp lệ cho lượt đầu ván (nếu chưa có bài trên bàn)
+        if not last_played_cards:
+            # SỬA: Chỉ yêu cầu combo hợp lệ, không yêu cầu 3♠
+            return self.validate_selection(selected_cards)
+
         combo_type = self.get_combo_type(selected_cards)
         if combo_type == "INVALID":
             return False
-        # First turn must include 3♠
-        if not last_played_cards:
-            return any(card.rank == '3' and card.suit == 'spades' for card in selected_cards)
         prev_combo_type = self.get_combo_type(last_played_cards)
         # Special beating rules
         if prev_combo_type == "FOUR_OF_A_KIND":
@@ -246,51 +317,41 @@ class Player:
         return 0
 
     # UI/interaction -------------
-    def handle_click(self, pos):
-        print(f"[DEBUG] handle_click called with pos={pos}, is_turn={self.is_turn}, passed={self.passed}, is_ai={getattr(self, 'is_ai', False)}")
+    def handle_click(self, pos, last_played_cards=None, game_first_turn=False):
+        """
+        Khi click card: toggle chọn, validate lại các lá đang chọn (border HỢP LỆ/ERROR - teal/red)
+        Thêm debug log các trạng thái khi click.
+        """
+        print(f"[CLICK] pos={pos} | is_turn={self.is_turn} | passed={self.passed} | is_ai={getattr(self,'is_ai',False)}")
         if self.is_turn and not self.passed and not getattr(self, 'is_ai', False):
+            # THÊM: Reset trạng thái invalid trước khi xử lý click
+            for card in self.hand:
+                card.invalid = False
+
             for card in sorted(self.hand, key=lambda c: c.z_index, reverse=True):
+                print(f"[DEBUG] Card {card} - rect={card.rect} - selected={card.selected}")
                 if card.rect.collidepoint(pos):
-                    print(f"[DEBUG] Card {card} was clicked! rect={card.rect} pos={pos}")
                     card.toggle_selected()
-                    self.update_invalid_states()
+                    print(f"[DEBUG] => Card {card} được {'chọn' if card.selected else 'bỏ chọn'}!")
+                    # CẬP NHẬT: Validate ngay sau khi click
+                    self.update_invalid_states(last_played_cards, game_first_turn)
+                    # In trạng thái từng card sau khi validate
+                    for c in self.hand:
+                        print(f"[STATE] {c}: selected={c.selected} | invalid={getattr(c, 'invalid', None)}")
                     return True
         return False
 
-    def update_hover(self, mouse_pos):
+    def update_hover(self, mouse_pos, last_played_cards=None, game_first_turn=False):
         if self.is_turn:
             for card in self.hand:
                 card.update_hover(mouse_pos)
-            self.update_invalid_states()
+            self.update_invalid_states(last_played_cards, game_first_turn)
 
     def draw_hand(self, screen, card_spacing=None):
-        if not self.hand: return
-        avatar_radius = 38
-        avatar_border = 3
-        score_value = int(self.score)
-        try:
-            avatar_num = int(self.name.split()[-1])
-        except:
-            avatar_num = 1
-
-        def draw_avatar_and_score(x, y):
-            # Border đỏ khi là AI (chỉ nổi bật trong mode 1_AI_3_Humans)
-            is_ai_highlight = getattr(self, 'is_ai', False)
-            pygame.draw.circle(screen, (255, 255, 255), (x, y), avatar_radius)
-            if is_ai_highlight:
-                pygame.draw.circle(screen, (220, 30, 30), (x, y), avatar_radius+3, 5)  # border đỏ nổi bật hơn
-            pygame.draw.circle(screen, (0, 0, 0), (x, y), avatar_radius, avatar_border)
-            font_num = pygame.font.SysFont('Arial', 28, bold=True)
-            num_surf = font_num.render(str(avatar_num), True, (40, 40, 40))
-            screen.blit(num_surf, (x-num_surf.get_width()//2, y-num_surf.get_height()//2))
-            font_score = pygame.font.SysFont('Arial', 18)
-            score_surf = font_score.render(str(score_value), True, (70, 130, 180))
-            screen.blit(score_surf, (x-score_surf.get_width()//2, y+avatar_radius+2))
+        if not self.hand:
+            return
 
         if self.position == 'bottom':
-            avatar_x = 26 + avatar_radius
-            avatar_y = screen.get_height() - avatar_radius - 34
-            draw_avatar_and_score(avatar_x, avatar_y)
             self.z_index_counter = 0
             if card_spacing is None:
                 max_spacing = min(Card.CARD_WIDTH * 0.6, (screen.get_width() * 0.9) / len(self.hand))
@@ -301,52 +362,44 @@ class Player:
             for i, card in enumerate(self.hand):
                 card.z_index = self.z_index_counter
                 x = start_x + i * card_spacing
-                card.face_up = self.is_turn
+                card.face_up = True  # Always show player's hand face up
                 card.draw(screen, (x + Card.CARD_WIDTH//2, y + Card.CARD_HEIGHT//2))
                 self.z_index_counter += 1
         else:
+            # Enlarged card display (non-bottom): 90% size, edges closer
             card_back_color = (255, 255, 255)
             border_color = (0, 0, 0)
-            card_scale = (avatar_radius * 2 + 12) / Card.CARD_HEIGHT
+            card_scale = 0.9  # 90% of base card size
             w = int(Card.CARD_WIDTH * card_scale)
             h = int(Card.CARD_HEIGHT * card_scale)
-            font = pygame.font.SysFont('Arial', int(22*card_scale), bold=True)
-            avatar_gap = 12
+            font = pygame.font.SysFont('Arial', int(21 * card_scale), bold=True)
+
+            edge_margin = 20
+            vertical_center = screen.get_height() // 2
 
             if self.position == 'top':
-                avatar_x = screen.get_width()//2 - w//2 - avatar_radius - avatar_gap
-                avatar_y = 40 + h//2
-                card_x = screen.get_width()//2 - w//2
+                card_x = screen.get_width() // 2 - w // 2
                 card_y = 40
-                draw_avatar_and_score(avatar_x, avatar_y)
                 card_rect_pos = (card_x, card_y)
             elif self.position == 'left':
-                avatar_x = 28 + avatar_radius
-                avatar_y = screen.get_height()//2
-                card_x = avatar_x + avatar_radius + avatar_gap
-                card_y = avatar_y - h//2
-                draw_avatar_and_score(avatar_x, avatar_y)
+                card_x = edge_margin
+                card_y = vertical_center - h // 2
                 card_rect_pos = (card_x, card_y)
             elif self.position == 'right':
-                avatar_x = screen.get_width() - (28 + avatar_radius)
-                avatar_y = screen.get_height()//2
-                card_x = avatar_x - avatar_radius - avatar_gap - w
-                card_y = avatar_y - h//2
-                draw_avatar_and_score(avatar_x, avatar_y)
+                card_x = screen.get_width() - w - edge_margin
+                card_y = vertical_center - h // 2
                 card_rect_pos = (card_x, card_y)
             else:
-                avatar_x = 64 + avatar_radius
-                avatar_y = 40 + h//2
-                card_x = screen.get_width()//2 - w//2
+                card_x = screen.get_width() // 2 - w // 2
                 card_y = 40
-                draw_avatar_and_score(avatar_x, avatar_y)
                 card_rect_pos = (card_x, card_y)
+
             card_surf = pygame.Surface((w, h), pygame.SRCALPHA)
-            pygame.draw.rect(card_surf, card_back_color, (0, 0, w, h), border_radius=int(10*card_scale))
-            pygame.draw.rect(card_surf, border_color, (0, 0, w, h), 2, border_radius=int(10*card_scale))
+            pygame.draw.rect(card_surf, card_back_color, (0, 0, w, h), border_radius=8)
+            pygame.draw.rect(card_surf, border_color, (0, 0, w, h), 2, border_radius=8)
             count_text = font.render(str(len(self.hand)), True, (100, 100, 100))
-            tx = w//2 - count_text.get_width()//2
-            ty = h//2 - count_text.get_height()//2
+            tx = w // 2 - count_text.get_width() // 2
+            ty = h // 2 - count_text.get_height() // 2
             card_surf.blit(count_text, (tx, ty))
             screen.blit(card_surf, card_rect_pos)
             return

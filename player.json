@@ -1,0 +1,18 @@
+[
+  {
+    "id": "player_1",
+    "name": "Player A"
+  },
+  {
+    "id": "player_2",
+    "name": "Player B"
+  },
+  {
+    "id": "player_3",
+    "name": "Player C"
+  },
+  {
+    "id": "player_4",
+    "name": "Player D"
+  }
+]

@@ -14,6 +14,8 @@ import torch
 from src.game.card import Card
 from .model import DQNAgent
 from .state_encoder import StateEncoder
+from .virtual_chef import VirtualChef
+import random
 
 class AIAgent:
     def __init__(self, player_index, model_path=None):
@@ -97,31 +99,35 @@ class AIAgent:
         def card_value(card):
             return Card.RANKS.index(card.rank), Card.SUITS.index(card.suit)
         return card_value(new_cards[0]) > card_value(last_cards[0])
-    def select_action(self, game_state):
-        """Chọn hành động dựa trên trạng thái game"""
+    def select_action(self, game_state, exploration_eps=0.05):
+        """Chọn hành động: Khám phá dùng VirtualChef, khai thác dùng Q-value"""
         state = self.state_encoder.encode(game_state, self.player_index)
-        # Sửa: Kiểm tra shape của state
         if len(state) != 128:
             print(f"[ERROR] Invalid state shape: {len(state)}")
-            state = np.zeros(128, dtype=np.float32)  # Fallback
-        
+            state = np.zeros(128, dtype=np.float32)
         valid_actions = self.get_valid_actions(game_state)
         print(f"[SELECT_ACTION] Player {self.player_index}, Valid actions: {valid_actions}")
 
-        # Sửa: Kiểm tra Q-values length
+        # Epsilon-greedy: khám phá với VirtualChef
+        eps = self.agent.epsilon if hasattr(self.agent, "epsilon") else exploration_eps
+        if random.random() < eps:
+            chosen = VirtualChef.suggest_random_valid_move(valid_actions)
+            print(f"[SELECT_ACTION][EXPLORE] VirtualChef chọn: {chosen}")
+            return chosen
+
+        # Khai thác Q-value
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.agent.device)
         with torch.no_grad():
             q_values = self.agent.policy_net(state_tensor).cpu().numpy()[0]
-        
         print(f"[SELECT_ACTION] Player {self.player_index}, Q-values: {q_values}")
 
-        # Bảo vệ khi q_values ngắn hơn valid_actions
+        # Bảo vệ trường hợp Q-value thiếu chỉ số action
         valid_q = [
             q_values[a] if a < len(q_values) else -np.inf
             for a in valid_actions
         ]
         best_action_idx = np.argmax(valid_q)
-        print(f"[SELECT_ACTION] Player {self.player_index}, Chose: {valid_actions[best_action_idx]}")
+        print(f"[SELECT_ACTION][EXPLOIT] Player {self.player_index}, Chose: {valid_actions[best_action_idx]}")
         return valid_actions[best_action_idx]
 
     def interpret_action(self, action_id, game_state):
