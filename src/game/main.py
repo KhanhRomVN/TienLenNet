@@ -15,14 +15,16 @@ class TienLenGame:
             return
 
         card_w = Card.CARD_WIDTH
-        spacing = min(40, max(10, (self.WINDOW_WIDTH - n * card_w) // (n + 1)))
-        total_w = n * card_w + (n - 1) * spacing
-        start_x = (self.WINDOW_WIDTH - total_w) // 2
+        # Sử dụng cách spacing giống player.draw_hand (xếp khít hơn), bài trên bàn sẽ đẹp:
+        spacing = min(card_w * 0.6, (self.WINDOW_WIDTH * 0.9) / n)
+        spacing = max(card_w * 0.3, spacing)
+        total_width = (n - 1) * spacing + card_w
+        start_x = (self.WINDOW_WIDTH - total_width) // 2
         y = self.WINDOW_HEIGHT // 2 - Card.CARD_HEIGHT // 2
 
         self.center_cards_pos = []
         for i in range(n):
-            x = start_x + i * (card_w + spacing)
+            x = int(start_x + i * spacing)
             self.center_cards_pos.append((x, y))
     def __init__(self, render=True):
         self.render = render
@@ -35,6 +37,8 @@ class TienLenGame:
         self.ai_players = []
         self.ai_agents = []
         self.consecutive_passes = 0  # THÊM dòng này cho reset_table>
+
+        self.passed_player_ids = []
 
         if self.render:
             import pygame
@@ -70,6 +74,7 @@ class TienLenGame:
         self.player_rankings = []
         self.consecutive_passes = 0
         self.players = []
+        self.passed_player_ids = []
         self.initialize_players()
 
     def initialize_players(self):
@@ -246,13 +251,18 @@ class TienLenGame:
             self.end_game(current_player.id)
             return  # QUAN TRỌNG: dừng, không xoay lượt
 
-        # Chỉ xoay lượt nếu người chơi chưa thắng
-        current_player.is_turn = False
-        next_player_idx = (self.players.index(current_player) + 1) % 4
-        self.current_player_id = self.players[next_player_idx].id
-        self.players[next_player_idx].is_turn = True
+        # Sau một lần đánh, mọi người có thể chơi tiếp -> reset hết lượt pass!
+        self.passed_player_ids = []
+        for p in self.players:
+            p.passed = False
 
-        # Xoay vị trí vật lý các player sau mỗi lượt
+        # Xoay lượt: người tiếp theo liền kề theo chiều kim đồng hồ, update current_player_id
+        current_player.is_turn = False
+        curr_idx = self.players.index(current_player)
+        next_idx = (curr_idx + 1) % len(self.players)
+        self.current_player_id = self.players[next_idx].id
+        self.players[next_idx].is_turn = True
+
         self.rotate_player_positions()
 
         # Xoay vị trí vật lý các player sau mỗi lượt
@@ -260,6 +270,38 @@ class TienLenGame:
 
     def pass_turn(self):
         current_player = self.get_player_by_id(self.current_player_id)
+        if current_player is None:
+            return
+
+        # Đánh dấu player này đã pass nếu chưa có trong danh sách
+        if current_player.id not in self.passed_player_ids:
+            self.passed_player_ids.append(current_player.id)
+        current_player.passed = True
+        current_player.clear_selection()
+        current_player.update_after_pass()
+
+        # Nếu đủ n-1 người pass, reset bàn: người cuối cùng đánh gần nhất sẽ giữ lượt
+        if len(self.passed_player_ids) >= len(self.players) - 1:
+            self.reset_table()
+            self.current_player_id = self.last_played_by if self.last_played_by else current_player.id
+            self.last_played_by = None
+            self.passed_player_ids = []
+            for p in self.players:
+                p.passed = False
+            self.rotate_player_positions()
+            return
+
+        # Xác định player chưa pass tiếp theo
+        current_player.is_turn = False
+        curr_idx = self.players.index(current_player)
+        for i in range(1, len(self.players) + 1):
+            nx = (curr_idx + i) % len(self.players)
+            next_player = self.players[nx]
+            if next_player.id not in self.passed_player_ids:
+                self.current_player_id = next_player.id
+                self.players[nx].is_turn = True
+                break
+        self.rotate_player_positions()
 
         if self.game_count == 1 and not self.last_played_cards:
             has_three_spades = any(card.rank == '3' and card.suit == 'spades' for card in current_player.hand)
@@ -491,6 +533,7 @@ class TienLenGame:
         self.center_cards = []
         self.arrange_center_cards()
         self.consecutive_passes = 0
+        self.passed_player_ids = []
         for player in self.players:
             player.passed = False
 
