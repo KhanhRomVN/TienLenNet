@@ -30,26 +30,52 @@ class GeminiAgent:
     def __init__(self):
         self.model = "gemini-2.0-flash"
 
-    def format_prompt(self, player_hand, play_history):
+    def format_prompt(self, player_hand, play_history, player=None):
         """
         Prepare structured prompt for Gemini.
         Args:
             player_hand (list of Card): Player's hand.
-            play_history (list of dict): [{'player': str, 'move': list of Card}]
+            play_history (list of dict): [{'player': str, 'move': list of Card or "PASS"}]
+            player (Player): (Optional) current player object for richer prompts.
         Returns:
             str
         """
         hand_str = ", ".join([f"{c.rank}{c.suit[0].upper()}" for c in player_hand])
+
+        # Lịch sử các nước đi (10 gần nhất)
         moves_str = ""
-        for hist in play_history[-10:]:
-            play_str = ", ".join([f"{c.rank}{c.suit[0].upper()}" for c in hist.get("move", [])])
-            moves_str += f"{hist['player']}: {play_str}\n"
+        for hist in play_history:
+            player_name = hist.get('player', 'Người chơi')
+            move = hist.get('move', [])
+            if move == "PASS":
+                moves_str += f"{player_name}: PASS\n"
+            else:
+                move_str = ", ".join(move) if isinstance(move, list) else str(move)
+                moves_str += f"{player_name}: {move_str}\n"
+
+        identity = ""
+        if player:
+            identity = f"Bạn là {player.name} (ID: {player.id}) "
+
+        # Added explicit warning about invalid 13-card moves
+        warning = (
+            "\nCẢNH BÁO: Nếu bạn trả lời bằng nhiều hơn 4 lá bài mà không phải sảnh/đôi thông, "
+            "hoặc đánh toàn bộ 13 lá, hệ thống sẽ tự động coi như PASS!\n"
+        )
+
         return (
-            "Bạn là AI chơi tiến lên. Ở lượt này bạn có các lá bài: " +
-            hand_str +
-            "\nLịch sử bàn gần nhất:\n" +
-            moves_str +
-            "\nHãy chọn các lá bài bạn muốn đánh (ví dụ: 3S, 4S hoặc PASS nếu bỏ lượt). Chỉ trả lời chính xác danh sách bài hoặc PASS."
+            f"{identity}chơi tiến lên. "
+            f"Ở lượt này bạn có các lá bài: {hand_str}\n"
+            "Lịch sử bàn gần nhất:\n" +
+            (moves_str if moves_str else "(Chưa có nước đi nào)\n") +
+            "\n"
+            "LUẬT NGHIÊM CẤM: Chỉ được đánh một bộ bài hợp lệ, không được đánh toàn bộ bài cùng lúc, "
+            "không đánh nhiều lá nếu không hợp luật (ví dụ: không đánh 13 lá, không đánh kết hợp đôi và lẻ cùng lúc).\n"
+            "Bạn chỉ được phép đánh SINGLE, PAIR, TRIPLE, FOUR-OF-A-KIND, STRAIGHT, PAIRS-STRAIGHT bộ hợp lệ theo luật Tiến Lên, "
+            "hoặc PASS nếu không có bộ hợp lệ.\n"
+            "Bạn phải trả lời chính xác danh sách bài hợp lệ HOẶC trả lời PASS (viết in hoa toàn bộ).\n"
+            "Tuyệt đối KHÔNG BAO GIỜ đánh ra nguyên bộ bài hoặc combo không hợp lệ!"
+            + warning
         )
 
     def parse_llm_response(self, llm_response, player_hand):
@@ -57,6 +83,7 @@ class GeminiAgent:
         Parse Gemini's response. Expecting: '3S, 4S', 'PASS', etc.
         Returns actual list of Card (from hand) for move.
         """
+        from .player import Player
         text = llm_response.strip().upper()
         if text.startswith("PASS"):
             return "PASS"
@@ -75,6 +102,11 @@ class GeminiAgent:
                 if c.rank.upper() == rank and c.suit == suit and c not in moves:
                     moves.append(c)
                     break
+        # Validate using Player.get_combo_type; force PASS if invalid or 13 cards
+        if moves:
+            combo_type = Player.get_combo_type(moves)
+            if combo_type == "INVALID":
+                return "PASS"
         return moves if moves else "PASS"
 
     def select_action(self, game, player):
@@ -91,7 +123,7 @@ class GeminiAgent:
         player_hand = player.hand[:]
         play_history = game.move_history
 
-        prompt = self.format_prompt(player_hand, play_history)
+        prompt = self.format_prompt(player_hand, play_history, player=player)
 
         api_key = GeminiAgent.get_next_api_key()
         key_str = api_key[:6] + "..." if api_key else "NONE"

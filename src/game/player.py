@@ -271,7 +271,11 @@ class Player:
         return self.compare_combinations(selected_cards, last_played_cards) > 0
 
     def get_combo_type(self, cards: List[Card]) -> str:
-        if not cards: return "INVALID"
+        if not cards:
+            return "INVALID"
+        # Block any 13-card play (cannot play whole hand in one move)
+        if len(cards) == 13:
+            return "INVALID"
         from collections import Counter
         n = len(cards)
         rank_counts = Counter(c.rank for c in cards)
@@ -319,26 +323,16 @@ class Player:
 
     # UI/interaction -------------
     def handle_click(self, pos, last_played_cards=None, game_first_turn=False):
-        """
-        Khi click card: toggle chọn, validate lại các lá đang chọn (border HỢP LỆ/ERROR - teal/red)
-        Thêm debug log các trạng thái khi click.
-        """
-        print(f"[CLICK] pos={pos} | is_turn={self.is_turn} | passed={self.passed} | is_ai={getattr(self,'is_ai',False)}")
+        print(f"[CLICK] pos={pos} | is_turn={self.is_turn} | passed={self.passed}")
         if self.is_turn and not self.passed and not getattr(self, 'is_ai', False):
-            # THÊM: Reset trạng thái invalid trước khi xử lý click
-            for card in self.hand:
-                card.invalid = False
-
             for card in sorted(self.hand, key=lambda c: c.z_index, reverse=True):
-                print(f"[DEBUG] Card {card} - rect={card.rect} - selected={card.selected}")
                 if card.rect.collidepoint(pos):
                     card.toggle_selected()
-                    print(f"[DEBUG] => Card {card} được {'chọn' if card.selected else 'bỏ chọn'}!")
-                    # CẬP NHẬT: Validate ngay sau khi click
+                    print(f"[DEBUG] => Card {card} {'selected' if card.selected else 'deselected'}!")
+
+                    # Validate selection immediately after click
                     self.update_invalid_states(last_played_cards, game_first_turn)
-                    # In trạng thái từng card sau khi validate
-                    for c in self.hand:
-                        print(f"[STATE] {c}: selected={c.selected} | invalid={getattr(c, 'invalid', None)}")
+
                     return True
         return False
 

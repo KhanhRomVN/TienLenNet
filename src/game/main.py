@@ -52,6 +52,7 @@ class TienLenGame:
         self.last_played_cards = []
         self.last_played_by = None
         self.ai_agents = []
+        self.move_history = []  # Thêm dòng này để khởi tạo lịch sử
 
         # LLM AI toggles (auto-read from environment)
         self.USE_LLM_AGENT = os.environ.get("USE_LLM_AGENT", "False").lower() in ["1", "true", "yes"]
@@ -74,14 +75,16 @@ class TienLenGame:
     # re-insert correct __init__ fields after get_player_at_position
     def __init__(self, render=True):
         self.render = render
-        self.WINDOW_WIDTH = 1280
-        self.WINDOW_HEIGHT = 720
+        self.WINDOW_WIDTH = 1920
+        self.WINDOW_HEIGHT = 1000
         if self.render:
             import pygame
             pygame.init()
             self.screen = pygame.display.set_mode((self.WINDOW_WIDTH, self.WINDOW_HEIGHT))
             pygame.display.set_caption("Tiến Lên - Card Game")
             self.clock = pygame.time.Clock()
+            self.font = pygame.font.SysFont('Arial', 24)
+            self.title_font = pygame.font.SysFont('Arial', 36, bold=True)
         else:
             self.screen = None
             self.clock = None
@@ -101,6 +104,7 @@ class TienLenGame:
         self.running = True
         self.game_count = 0
         self.player_rankings = []
+        self.move_history = []
 
         # Ensure LLM_MODEL is always set before initialize_players
         self.initialize_players()
@@ -132,6 +136,9 @@ class TienLenGame:
                 is_ai=is_ai
             )
             self.players.append(player)
+
+        # Save canonical seat order (list of IDs in order)
+        self.seat_order = [player.id for player in self.players]
 
         # Assign GeminiAgent to all AI players if LLM agent is enabled; otherwise None.
         self.ai_agents = {}
@@ -219,27 +226,24 @@ class TienLenGame:
                 return
 
     def play_cards(self):
+        import traceback
+        print("[PLAY LOG] ------- play_cards CALLED -------")
+        traceback.print_stack(limit=8)
+        print(f"[PLAY LOG] --> Called for current_player_id={self.current_player_id}")
         current_player = self.get_player_by_id(self.current_player_id)
         selected_cards = current_player.get_selected_cards()
 
         # Nếu không chọn lá bài nào thì không làm gì cả, tránh clear bàn do call thừa
         if not selected_cards:
+            print("[PLAY LOG] No selected_cards, returning immediately.")
             return
 
         # Prevent crash: log_move may not be defined
         if hasattr(self, "log_move"):
             self.log_move(current_player, selected_cards if selected_cards else None)
         
-        if current_player.can_play_cards(selected_cards, self.last_played_cards):
-            current_player.remove_cards(selected_cards)
-            self.last_played_cards = selected_cards
-            self.last_played_by = current_player.id
-            self.center_cards = selected_cards
-            self.arrange_center_cards()  # luôn cập nhật vị trí bài
-
-            current_player.passed = False
-            self.consecutive_passes = 0
-        else:
+        # Validate lại trước khi thực thi
+        if not current_player.can_play_cards(selected_cards, self.last_played_cards):
             # Chỉ clear center_cards (hiển thị bài sai) nếu đã từng có bài trên bàn/lượt chặn,
             # Còn lượt đầu, không clear tức là giữ nguyên trạng thái bàn
             if self.last_played_cards:
@@ -247,6 +251,27 @@ class TienLenGame:
                 self.center_cards_pos = []
                 self.arrange_center_cards()
                 self.last_played_cards = []
+            return
+
+        # Số lượng bài hợp lệ tối đa allowed
+        if len(selected_cards) not in [1, 2, 3, 4] and not self.is_valid_straight(selected_cards):
+            # Không cho phép đánh combo lạ, bỏ qua thao tác
+            return
+
+        # Ghi lại lịch sử
+        self.move_history.append({
+            'player': current_player.name,
+            'move': [f"{c.rank}{c.suit[0].upper()}" for c in selected_cards]
+        })
+        current_player.remove_cards(selected_cards)
+        self.last_played_cards = selected_cards
+        self.last_played_by = current_player.id
+        print(f"[PLAY LOG] Setting last_played_by={self.last_played_by} after play by {current_player.name} (id={current_player.id})")
+        self.center_cards = selected_cards
+        self.arrange_center_cards()  # luôn cập nhật vị trí bài
+
+        current_player.passed = False
+        self.consecutive_passes = 0
 
         if not current_player.hand:
             self.reset_table()
@@ -267,76 +292,138 @@ class TienLenGame:
 
         self.rotate_player_positions()
 
-        # Xoay vị trí vật lý các player sau mỗi lượt
-        self.rotate_player_positions()
+    def is_valid_straight(self, cards):
+        """Kiểm tra xem cards có phải là sảnh hợp lệ (hoặc đôi thông) đúng luật."""
+        from collections import Counter
+        if not cards or len(cards) < 3:
+            return False
+        # Sảnh lẻ
+        values = [Card.RANKS.index(c.rank) for c in cards]
+        if len(set(values)) == len(values) and all(values[i]+1 == values[i+1] for i in range(len(values)-1)):
+            return True
+        # Đôi thông
+        if len(cards) >= 6 and len(cards) % 2 == 0:
+            rank_groups = {}
+            for card in cards:
+                rank_groups.setdefault(card.rank, []).append(card)
+            if not all(len(group) == 2 for group in rank_groups.values()):
+                return False
+            sorted_ranks = sorted(rank_groups.keys(), key=lambda r: Card.RANKS.index(r))
+            rank_indices = [Card.RANKS.index(r) for r in sorted_ranks]
+            if all(rank_indices[i]+1==rank_indices[i+1] for i in range(len(rank_indices)-1)):
+                return True
+        return False
 
     def pass_turn(self):
+        import traceback
+        print("[PASS LOG] ------- pass_turn CALLED -------")
+        traceback.print_stack(limit=8)
+        print(f"[PASS LOG] --> Called with current_player_id={self.current_player_id}")
         current_player = self.get_player_by_id(self.current_player_id)
         if current_player is None:
+            print("[PASS LOG] current_player is None, cannot pass turn.")
             return
+
+        # Không cho PASS nếu bàn đang trống (không có bài trên bàn)!
+        if not self.last_played_cards:
+            print("[PASS LOG] Forbidden: Attempted to PASS when no cards on the table (new round). PASS ignored.")
+            return
+
+        print(f"[PASS LOG] Player {current_player.name} (id={current_player.id}) initiates PASS.")
+        print(f"  [PASS LOG] Before pass: passed_player_ids={self.passed_player_ids}, current_player.passed={current_player.passed}")
 
         # Đánh dấu player này đã pass nếu chưa có trong danh sách
         if current_player.id not in self.passed_player_ids:
             self.passed_player_ids.append(current_player.id)
+            print(f"  [PASS LOG] -> Added to passed_player_ids: {self.passed_player_ids}")
         current_player.passed = True
         current_player.clear_selection()
         current_player.update_after_pass()
 
+        print(f"  [PASS LOG] After pass flag: passed_player_ids={self.passed_player_ids}")
+        print(f"  [PASS LOG] Players state:")
+        for idx, player in enumerate(self.players):
+            print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn} | passed={player.passed} | in_passed_ids={player.id in self.passed_player_ids}")
+
         # Nếu đủ n-1 người pass, reset bàn: người cuối cùng đánh gần nhất sẽ giữ lượt
         if len(self.passed_player_ids) >= len(self.players) - 1:
+            print(f"[PASS LOG] Enough ({len(self.passed_player_ids)}) players have passed, resetting table.")
+            # Extra logging before reset
+            print("[PASS LOG] --- BEFORE reset_table() ---")
+            for idx, player in enumerate(self.players):
+                print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn}")
+            # --- FIX: Save last_played_by before table reset ---
+            last_valid_player = self.last_played_by
             self.reset_table()
-            self.current_player_id = self.last_played_by if self.last_played_by else current_player.id
+            # Log after reset_table
+            print("[PASS LOG] --- AFTER reset_table() ---")
+            for idx, player in enumerate(self.players):
+                print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn}")
+            print(f"[PASS LOG] last_valid_player (saved last_played_by)={last_valid_player} current_player.id={current_player.id}")
+            if not last_valid_player:
+                print("[ERROR] last_played_by is None during mass pass table reset! Assigning next in seating order to prevent crash.")
+                # Safety fallback: assign first player as current if last_played_by is None
+                if self.players:
+                    self.current_player_id = self.players[0].id
+                    print(f"[PASS LOG] Fallback: set current_player_id to first player: {self.current_player_id}")
+                else:
+                    self.current_player_id = None
+            else:
+                self.current_player_id = last_valid_player
+                print(f"[PASS LOG] Now setting current_player_id={self.current_player_id} after table reset.")
+            # Safe to clear last_played_by now
             self.last_played_by = None
             self.passed_player_ids = []
             for p in self.players:
                 p.passed = False
+            # Cập nhật trạng thái turn cho người chơi mới
+            print("[PASS LOG] is_turn assignment pass:")
+            for idx, player in enumerate(self.players):
+                print(f" before assign: [{idx}] {player.name} (id={player.id}) | is_turn={player.is_turn}")
+            for player in self.players:
+                player.is_turn = (player.id == self.current_player_id)
+            for idx, player in enumerate(self.players):
+                print(f" after assign: [{idx}] {player.name} (id={player.id}) | is_turn={player.is_turn}")
+            print("[PASS LOG] After all passed: now rotating table to current player at bottom.")
             self.rotate_player_positions()
+            # Log after table reset and rotate
+            print("[PASS LOG] --- AFTER ROTATE ---")
+            for idx, player in enumerate(self.players):
+                print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn}")
+            print("[PASS LOG] Table reset: Player order after reset:")
+            for idx, player in enumerate(self.players):
+                print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn}")
             return
 
-        # Xác định player chưa pass tiếp theo
-        current_player.is_turn = False
-        curr_idx = self.players.index(current_player)
+        # Tìm người chơi tiếp theo CHƯA PASS
+        current_idx = self.players.index(current_player)
+        next_player = None
+
+        # Duyệt tất cả người chơi theo chiều kim đồng hồ
+        print("[PASS LOG] Finding next player who has NOT passed.")
         for i in range(1, len(self.players) + 1):
-            nx = (curr_idx + i) % len(self.players)
-            next_player = self.players[nx]
-            if next_player.id not in self.passed_player_ids:
-                self.current_player_id = next_player.id
-                self.players[nx].is_turn = True
-                break
-        self.rotate_player_positions()
+            next_idx = (current_idx + i) % len(self.players)
+            candidate = self.players[next_idx]
+            print(f"    [PASS LOG] Checking candidate {candidate.name} (id={candidate.id}) passed={candidate.passed}")
+            # Bỏ qua người đã pass
+            if candidate.id in self.passed_player_ids:
+                continue
+            next_player = candidate
+            print(f"    [PASS LOG] -> Next player chosen: {candidate.name} (id={candidate.id}) at idx={next_idx}")
+            break
 
-        if self.game_count == 1 and not self.last_played_cards:
-            has_three_spades = any(card.rank == '3' and card.suit == 'spades' for card in current_player.hand)
-            if has_three_spades:
-                return
-
-        current_player.passed = True
-        current_player.clear_selection()
-        current_player.update_after_pass()
-        self.consecutive_passes += 1
-
-        if self.last_played_by is not None:
-            all_others_passed = True
-            for player in self.players:
-                if player.id == self.last_played_by:
-                    continue
-                if not player.passed:
-                    all_others_passed = False
-                    break
-
-            if all_others_passed:
-                self.reset_table()
-                self.current_player_id = self.last_played_by
-                self.last_played_by = None
-                for player in self.players:
-                    player.passed = False
-                self.consecutive_passes = 0
-                return
-
-        current_player.is_turn = False
-        next_player_idx = (self.players.index(current_player) + 1) % 4
-        self.current_player_id = self.players[next_player_idx].id
-        self.players[next_player_idx].is_turn = True
+        # Nếu tìm thấy người chơi tiếp theo
+        if next_player:
+            current_player.is_turn = False
+            next_player.is_turn = True
+            self.current_player_id = next_player.id
+            print(f"[PASS LOG] Before rotate: players order/positions:")
+            for idx, player in enumerate(self.players):
+                print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn}")
+            self.rotate_player_positions()
+            print(f"[PASS LOG] After rotate: players order/positions:")
+            for idx, player in enumerate(self.players):
+                print(f"    [{idx}] {player.name} (id={player.id}) | pos={player.position} | is_turn={player.is_turn}")
 
     def end_game(self, winner_id):
         winner = self.get_player_by_id(winner_id)
@@ -445,6 +532,10 @@ class TienLenGame:
             self.screen.blit(name_text, (info_x + 16, info_y + 13))
             self.screen.blit(id_text, (info_x + 16, info_y + 36))
 
+        # Debounce state for mouse buttons (to avoid frame-repeat clicks)
+        if not hasattr(self, "_prev_mouse_down"):
+            self._prev_mouse_down = False
+
         if hasattr(self, 'play_button') and hasattr(self, 'pass_button'):
             current_player = self.get_player_by_id(self.current_player_id) if hasattr(self, "current_player_id") else None
             can_play = False
@@ -467,14 +558,17 @@ class TienLenGame:
             pass_text = self.font.render("PASS", True, (255, 255, 255))
             pass_rect = pass_text.get_rect(center=self.pass_button.center)
             self.screen.blit(pass_text, pass_rect)
-            # Button click actions
+            # Button click actions: DE-BOUNCED so triggers only on mouse DOWN edge
             mouse_buttons = pygame.mouse.get_pressed()
             mouse_pos = pygame.mouse.get_pos()
-            if mouse_buttons[0]:
+            mouse_down = mouse_buttons[0]
+            # Only trigger event if not held last frame
+            if mouse_down and not self._prev_mouse_down:
                 if self.play_button.collidepoint(mouse_pos):
                     self.play_cards()
                 elif self.pass_button.collidepoint(mouse_pos):
                     self.pass_turn()
+            self._prev_mouse_down = mouse_down
 
         pygame.display.flip()
 
@@ -491,60 +585,86 @@ class TienLenGame:
 
             while self.running:
                 current_player = self.get_player_by_id(self.current_player_id)
-                
+
                 if current_player.is_ai:
-                    # ... AI logic ...
                     try:
                         agent = self.ai_agents[current_player.id]
+                        # Determine if this is the first turn for move validation
+                        game_first_turn = (self.game_count == 1 and not self.last_played_cards)
                         if isinstance(agent, GeminiAgent):
                             llm_action = agent.select_action(self, current_player)
                             if llm_action == "PASS":
-                                self.pass_turn()
+                                self.pass_turn()  # This updates game state
                             else:
-                                for card in current_player.hand:
-                                    card.selected = card in llm_action
-                                self.play_cards()
+                                # Validate move before playing
+                                if current_player.can_play_cards(llm_action, self.last_played_cards, game_first_turn):
+                                    # Select the cards in player's hand
+                                    for card in current_player.hand:
+                                        card.selected = (card in llm_action)
+                                    # Play the cards - this updates game state
+                                    self.play_cards()
+                                else:
+                                    print(f"[MAIN] Invalid move by {current_player.name}, forcing PASS")
+                                    self.pass_turn()
                         else:
+                            # RL or other agent logic
                             action_id = agent.select_action(self)
                             action = agent.interpret_action(action_id, self)
                             if action == "PASS":
                                 self.pass_turn()
                             else:
-                                for card in current_player.hand:
-                                    card.selected = card in action
-                                self.play_cards()
+                                # Validate move before playing
+                                if current_player.can_play_cards(action, self.last_played_cards, game_first_turn):
+                                    for card in current_player.hand:
+                                        card.selected = (card in action)
+                                    self.play_cards()
+                                else:
+                                    print(f"[MAIN] Invalid move by {current_player.name} (RL/Other), forcing PASS")
+                                    self.pass_turn()
                     except Exception as e:
+                        print(f"Error in AI move: {str(e)}")
                         self.pass_turn()
                 else:
                     self.handle_events()
 
                 if self.render:
-                    # ... drawing logic ...
                     import pygame
                     self.draw()
-                    self.clock.tick(60)
-                    
+                    if self.clock:
+                        self.clock.tick(60)
+
         except Exception as e:
             import traceback
             traceback.print_exc()
 
     def rotate_player_positions(self):
-        # Gán lại player.position sao cho current_player luôn là 'bottom', xoay visual đúng.
+        # Luôn xoay thứ tự danh sách self.players, người tới lượt sẽ luôn là index 0
         positions = ['bottom', 'right', 'top', 'left']
         num_players = len(self.players)
         if num_players == 4:
-            # Tìm index của current_player
             idx = None
             for i, player in enumerate(self.players):
                 if player.id == self.current_player_id:
                     idx = i
                     break
             if idx is not None:
-                for offset in range(4):
-                    player = self.players[(idx + offset) % 4]
-                    player.position = positions[offset]
+                # Dịch vòng self.players để current_player ở đầu
+                self.players = self.players[idx:] + self.players[:idx]
+                for i, player in enumerate(self.players):
+                    player.position = positions[i]
+        # Log vị trí các player sau xoay để debug dễ
+        print("[LOG] Vị trí người chơi sau khi xoay:")
+        for p in self.players:
+            print(f"    {p.name} (id={p.id}): {p.position} | is_turn={p.is_turn}")
 
     def reset_table(self):
+        print("[RESET LOG] ------- reset_table CALLED -------")
+        print(f"[RESET LOG] Table state before reset: passed_player_ids={self.passed_player_ids}")
+        # --- CANONICALIZE ORDER before any rotate/assignment! ---
+        if hasattr(self, "seat_order"):
+            id_to_player = {p.id: p for p in self.players}
+            self.players = [id_to_player[pid] for pid in self.seat_order]
+            print("[RESET LOG] Canonical player order:", [p.name for p in self.players])
         self.last_played_cards = []
         self.last_played_by = None
         self.center_cards = []
@@ -553,6 +673,7 @@ class TienLenGame:
         self.passed_player_ids = []
         for player in self.players:
             player.passed = False
+        print(f"[RESET LOG] Table state after reset: passed_player_ids={self.passed_player_ids}")
 
     def prepare_new_game(self):
         """Prepare a new game: deal cards, reset state, find starter."""
@@ -575,6 +696,25 @@ class TienLenGame:
         self.last_played_cards = []
         # Arrange player positions so that starter is at bottom
         self.rotate_player_positions()
+        # Place Play and Pass buttons in the bottom-right corner
+        if self.render and self.screen:
+            import pygame
+            btn_w, btn_h = 150, 55
+            gap = 20
+            right_margin = 30
+            bottom_margin = 30
+            self.play_button = pygame.Rect(
+                self.WINDOW_WIDTH - btn_w - right_margin,
+                self.WINDOW_HEIGHT - 2 * btn_h - gap - bottom_margin,
+                btn_w,
+                btn_h
+            )
+            self.pass_button = pygame.Rect(
+                self.WINDOW_WIDTH - btn_w - right_margin,
+                self.WINDOW_HEIGHT - btn_h - bottom_margin,
+                btn_w,
+                btn_h
+            )
 
 if __name__ == '__main__':
     game = TienLenGame()
