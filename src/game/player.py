@@ -12,6 +12,7 @@ class Player:
         self.passed = False
         self.z_index_counter = 0
         self.is_ai = is_ai  # AI flag
+        self.combo_history = set()  # Add this for GeminiAgent
 
         # RL reward system variables
         self.score = 0  # Số điểm hiện tại

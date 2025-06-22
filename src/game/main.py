@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import sys
 from .card import Card
 from .player import Player
@@ -5,6 +7,7 @@ from .game_logic import GameLogic
 from .ui import constants as UI
 import os
 import json
+from src.game.gemini_agent import GeminiAgent
 
 class TienLenGame:
     def arrange_center_cards(self):
@@ -15,7 +18,6 @@ class TienLenGame:
             return
 
         card_w = Card.CARD_WIDTH
-        # Sử dụng cách spacing giống player.draw_hand (xếp khít hơn), bài trên bàn sẽ đẹp:
         spacing = min(card_w * 0.6, (self.WINDOW_WIDTH * 0.9) / n)
         spacing = max(card_w * 0.3, spacing)
         total_width = (n - 1) * spacing + card_w
@@ -28,69 +30,101 @@ class TienLenGame:
             self.center_cards_pos.append((x, y))
     def __init__(self, render=True):
         self.render = render
+        self.WINDOW_WIDTH = 1280
+        self.WINDOW_HEIGHT = 720
+        if self.render:
+            import pygame
+            pygame.init()
+            # Set fullscreen mode
+            display_info = pygame.display.Info()
+            self.WINDOW_WIDTH, self.WINDOW_HEIGHT = display_info.current_w, display_info.current_h
+            self.screen = pygame.display.set_mode(
+                (self.WINDOW_WIDTH, self.WINDOW_HEIGHT), pygame.FULLSCREEN
+            )
+            pygame.display.set_caption("Tiến Lên - Card Game")
+            self.clock = pygame.time.Clock()
+        else:
+            self.screen = None
+            self.clock = None
         self.center_cards = []
         self.center_cards_pos = []
         self.current_player_id = None
         self.last_played_cards = []
         self.last_played_by = None
-        self.game_mode = None
-        self.ai_players = []
         self.ai_agents = []
-        self.consecutive_passes = 0  # THÊM dòng này cho reset_table>
 
-        self.passed_player_ids = []
+        # LLM AI toggles (auto-read from environment)
+        self.USE_LLM_AGENT = os.environ.get("USE_LLM_AGENT", "False").lower() in ["1", "true", "yes"]
 
+    def get_player_at_position(self, position):
+        """Return the player object matching the given position ('bottom', 'top', etc). Return None if not found."""
+        for player in self.players:
+            if player.position == position:
+                return player
+        return None
+
+    def get_llm_model(self):
+        """Ensure LLM_MODEL is always initialized, fallback to default if missing."""
+        return getattr(self, "LLM_MODEL", os.environ.get("LLM_MODEL", "gemini-2.0-flash"))
+
+    def __post_init__(self):
+        """Explicit post-init to ensure LLM_MODEL set before player usage."""
+        self.LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
+
+    # re-insert correct __init__ fields after get_player_at_position
+    def __init__(self, render=True):
+        self.render = render
+        self.WINDOW_WIDTH = 1280
+        self.WINDOW_HEIGHT = 720
         if self.render:
             import pygame
             pygame.init()
-            pygame.font.init()
-            screen_info = pygame.display.Info()
-            self.WINDOW_WIDTH = screen_info.current_w
-            self.WINDOW_HEIGHT = screen_info.current_h
-            self.screen = pygame.display.set_mode((screen_info.current_w, screen_info.current_h), pygame.FULLSCREEN)
-            pygame.display.set_caption("Tiến Lên - Modern Edition")
+            self.screen = pygame.display.set_mode((self.WINDOW_WIDTH, self.WINDOW_HEIGHT))
+            pygame.display.set_caption("Tiến Lên - Card Game")
             self.clock = pygame.time.Clock()
-            self.font = pygame.font.SysFont('Arial', 24)
-            self.title_font = pygame.font.SysFont('Arial', 36, bold=True)
-            button_width, button_height = 120, 45
-            self.play_button = pygame.Rect(self.WINDOW_WIDTH - button_width - 20,
-                                      self.WINDOW_HEIGHT - button_height - 20,
-                                      button_width, button_height)
-            self.pass_button = pygame.Rect(self.WINDOW_WIDTH - button_width*2 - 30,
-                                      self.WINDOW_HEIGHT - button_height - 20,
-                                      button_width, button_height)
         else:
-            self.WINDOW_WIDTH = 1920
-            self.WINDOW_HEIGHT = 1080
             self.screen = None
             self.clock = None
-            self.font = None
-            self.title_font = None
-            self.play_button = None
-            self.pass_button = None
+        self.center_cards = []
+        self.center_cards_pos = []
+        self.current_player_id = None
+        self.last_played_cards = []
+        self.last_played_by = None
+        self.ai_agents = []
 
-        self.running = True
-        self.game_count = 0
-        self.player_rankings = []
+        # LLM AI toggles (auto-read from environment)
+        self.USE_LLM_AGENT = os.environ.get("USE_LLM_AGENT", "False").lower() in ["1", "true", "yes"]
+        self.LLM_MODEL = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
         self.consecutive_passes = 0
         self.players = []
         self.passed_player_ids = []
+        self.running = True
+        self.game_count = 0
+        self.player_rankings = []
+
+        # Ensure LLM_MODEL is always set before initialize_players
         self.initialize_players()
+        # Debug print for each player and ai_agent
+        print("[DEBUG] Player assignments after init:")
+        for player in self.players:
+            agent = getattr(self, 'ai_agents', {}).get(player.id, None)
+            print(f"  Player {player.name} (id={player.id}) | is_ai={player.is_ai} | ai_agent={type(agent)}")
+
+    def get_player_by_id(self, player_id):
+        """Return the player object matching player_id. Return None if not found."""
+        for player in self.players:
+            if player.id == player_id:
+                return player
+        return None
+
 
     def initialize_players(self):
-        self.players = []  # QUAN TRỌNG: luôn reset danh sách player trước khi tạo mới!
+        self.players = []  # Always reset player list
         positions = ['bottom', 'right', 'top', 'left']
         with open("player.json", "r") as f:
             player_list = json.load(f)
-
         for i, (player_info, position) in enumerate(zip(player_list, positions)):
-            if self.game_mode == "1_AI_3_Humans":
-                is_ai = (i == 0)
-            elif self.game_mode == "4_AI":
-                is_ai = True
-            else:
-                is_ai = False
-
+            is_ai = self.USE_LLM_AGENT
             player = Player(
                 id=player_info["id"],
                 name=player_info["name"],
@@ -99,45 +133,13 @@ class TienLenGame:
             )
             self.players.append(player)
 
-    def get_player_by_id(self, player_id):
+        # Assign GeminiAgent to all AI players if LLM agent is enabled; otherwise None.
+        self.ai_agents = {}
         for player in self.players:
-            if player.id == player_id:
-                return player
-        return None
-
-    def get_player_at_position(self, position: str):
-        for player in self.players:
-            if player.position == position:
-                return player
-        return None
-
-    def prepare_new_game(self):
-        import datetime
-        self.game_count += 1
-        self.last_played_cards = []
-        self.last_played_by = None
-        self.center_cards = []
-        self.center_cards_pos = []
-        
-        os.makedirs("logs", exist_ok=True)
-        now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_file_path = f"logs/game_{now}.log"
-
-        for player in self.players:
-            player.hand = []
-            player.is_turn = False
-            player.passed = False
-
-        self.deck = GameLogic.create_deck()
-        self.deal_cards()
-
-        starter = GameLogic.find_starting_player(self.players)
-        self.current_player_id = starter.id
-        starter.is_turn = True
-        self.round_starter = starter.id
-
-        for player in self.players:
-            cards = ", ".join([f"{card.rank}{card.suit[0]}" for card in player.hand])
+            if player.is_ai and self.LLM_MODEL == "gemini-2.0-flash":
+                self.ai_agents[player.id] = GeminiAgent()
+            elif player.is_ai:
+                self.ai_agents[player.id] = None
 
         if self.game_count == 1:
             new_order = [starter]
@@ -398,9 +400,12 @@ class TienLenGame:
         Initialize ai_agents dict for all AI players.
         Fills with None as placeholder (to be replaced by actual agents in RL mode).
         """
+        # Tạo self.ai_agents sau khi đã gán is_ai cho tất cả player
         self.ai_agents = {}
         for player in self.players:
-            if player.is_ai:
+            if player.is_ai and getattr(self, "USE_LLM_AGENT", False) and getattr(self, "LLM_MODEL", "") == "gemini-2.0-flash":
+                self.ai_agents[player.id] = GeminiAgent()
+            elif player.is_ai:
                 self.ai_agents[player.id] = None
     def draw(self):
         """Draw the full game state (cards, play area, UI buttons)"""
@@ -475,34 +480,46 @@ class TienLenGame:
 
     def run(self):
         try:
-            # KHÔNG hiển thị menu chọn chế độ, luôn mặc định "4_Humans"
-            self.game_mode = "4_Humans"
+            # Always use 4_Humans mode, do not display mode menu
+            # Mode selection removed: always use human/LLM fallback as set above
 
             self.initialize_players()
+            print("[DEBUG] USE_LLM_AGENT =", self.USE_LLM_AGENT, "| LLM_MODEL =", self.LLM_MODEL)
             self.setup_ai_players()
+            print("[DEBUG] ai_agents =", self.ai_agents)
             self.prepare_new_game()
 
             while self.running:
                 current_player = self.get_player_by_id(self.current_player_id)
                 
                 if current_player.is_ai:
+                    # ... AI logic ...
                     try:
                         agent = self.ai_agents[current_player.id]
-                        action_id = agent.select_action(self)
-                        action = agent.interpret_action(action_id, self)
-                        
-                        if action == "PASS":
-                            self.pass_turn()
+                        if isinstance(agent, GeminiAgent):
+                            llm_action = agent.select_action(self, current_player)
+                            if llm_action == "PASS":
+                                self.pass_turn()
+                            else:
+                                for card in current_player.hand:
+                                    card.selected = card in llm_action
+                                self.play_cards()
                         else:
-                            for card in current_player.hand:
-                                card.selected = card in action
-                            self.play_cards()
+                            action_id = agent.select_action(self)
+                            action = agent.interpret_action(action_id, self)
+                            if action == "PASS":
+                                self.pass_turn()
+                            else:
+                                for card in current_player.hand:
+                                    card.selected = card in action
+                                self.play_cards()
                     except Exception as e:
                         self.pass_turn()
                 else:
                     self.handle_events()
 
                 if self.render:
+                    # ... drawing logic ...
                     import pygame
                     self.draw()
                     self.clock.tick(60)
@@ -536,6 +553,28 @@ class TienLenGame:
         self.passed_player_ids = []
         for player in self.players:
             player.passed = False
+
+    def prepare_new_game(self):
+        """Prepare a new game: deal cards, reset state, find starter."""
+        self.game_count += 1
+        self.reset_table()
+        self.deck = GameLogic.create_deck()
+        self.deal_cards()
+        starter = GameLogic.find_starting_player(self.players)
+        # Set the starting player as current
+        self.current_player_id = starter.id
+        # Reset turn flags: only starter has turn
+        for player in self.players:
+            player.is_turn = (player.id == starter.id)
+            player.reset_state()
+        # Reset game state
+        self.consecutive_passes = 0
+        self.last_played_by = None
+        self.passed_player_ids = []
+        self.center_cards = []
+        self.last_played_cards = []
+        # Arrange player positions so that starter is at bottom
+        self.rotate_player_positions()
 
 if __name__ == '__main__':
     game = TienLenGame()
