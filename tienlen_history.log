@@ -1,0 +1,78 @@
+[2025-06-27 08:10:12] Player A hand: 3S, 3C, 5S, 7D, 7H, 10S, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:10:12] Player A played: 3S
+[2025-06-27 08:10:14] Player B hand: 3D, 3H, 5C, 6H, 8D, 8H, 9H, 10H, JS, JD, KC, AC, 2C
+[2025-06-27 08:10:14] Player B played: 3D
+[2025-06-27 08:10:17] Player C hand: 4C, 4D, 5D, 5H, 6S, 9S, 9C, 9D, JH, QD, QH, KD, 2D
+[2025-06-27 08:10:17] Player C played: 4C
+[2025-06-27 08:10:21] Player D hand: 4S, 4H, 6C, 6D, 7S, 7C, 8S, 8C, 10C, 10D, JC, QS, AS
+[2025-06-27 08:10:21] Player D played: PASS
+[2025-06-27 08:10:23] Player A hand: 3C, 5S, 7D, 7H, 10S, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:10:23] Player A played: 5S
+[2025-06-27 08:10:26] Player B hand: 3H, 5C, 6H, 8D, 8H, 9H, 10H, JS, JD, KC, AC, 2C
+[2025-06-27 08:10:26] Player B played: PASS
+[2025-06-27 08:10:30] Player C hand: 4D, 5D, 5H, 6S, 9S, 9C, 9D, JH, QD, QH, KD, 2D
+[2025-06-27 08:10:30] Player C played: PASS
+[2025-06-27 08:10:32] Player D hand: 4S, 4H, 6C, 6D, 7S, 7C, 8S, 8C, 10C, 10D, JC, QS, AS
+[2025-06-27 08:10:32] Player D played: 6C
+[2025-06-27 08:10:32] Player A hand: 3C, 7D, 7H, 10S, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:10:32] Player A played: PASS
+[2025-06-27 08:10:34] Player B hand: 3H, 5C, 6H, 8D, 8H, 9H, 10H, JS, JD, KC, AC, 2C
+[2025-06-27 08:10:34] Player B played: PASS
+[2025-06-27 08:10:35] Player C hand: 4D, 5D, 5H, 6S, 9S, 9C, 9D, JH, QD, QH, KD, 2D
+[2025-06-27 08:10:35] Player C played: PASS
+[2025-06-27 08:10:36] Player D hand: 4S, 4H, 6D, 7S, 7C, 8S, 8C, 10C, 10D, JC, QS, AS
+[2025-06-27 08:10:36] Player D played: 7S
+[2025-06-27 08:10:38] Player A hand: 3C, 7D, 7H, 10S, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:10:38] Player A played: 7D
+[2025-06-27 08:10:40] Player B hand: 3H, 5C, 6H, 8D, 8H, 9H, 10H, JS, JD, KC, AC, 2C
+[2025-06-27 08:10:40] Player B played: 8D
+[2025-06-27 08:10:41] Player C hand: 4D, 5D, 5H, 6S, 9S, 9C, 9D, JH, QD, QH, KD, 2D
+[2025-06-27 08:10:41] Player C played: 9S
+[2025-06-27 08:10:43] Player D hand: 4S, 4H, 6D, 7C, 8S, 8C, 10C, 10D, JC, QS, AS
+[2025-06-27 08:10:43] Player D played: PASS
+[2025-06-27 08:10:46] Player A hand: 3C, 7H, 10S, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:10:46] Player A played: 10S
+[2025-06-27 08:10:49] Player B hand: 3H, 5C, 6H, 8H, 9H, 10H, JS, JD, KC, AC, 2C
+[2025-06-27 08:10:49] Player B played: JS
+[2025-06-27 08:10:53] Player C hand: 4D, 5D, 5H, 6S, 9C, 9D, JH, QD, QH, KD, 2D
+[2025-06-27 08:10:53] Player C played: JH
+[2025-06-27 08:11:00] Player D hand: 4S, 4H, 6D, 7C, 8S, 8C, 10C, 10D, JC, QS, AS
+[2025-06-27 08:11:00] Player D played: QS
+[2025-06-27 08:11:02] Player A hand: 3C, 7H, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:11:02] Player A played: PASS
+[2025-06-27 08:11:04] Player B hand: 3H, 5C, 6H, 8H, 9H, 10H, JD, KC, AC, 2C
+[2025-06-27 08:11:04] Player B played: AC
+[2025-06-27 08:11:10] Player C hand: 4D, 5D, 5H, 6S, 9C, 9D, QD, QH, KD, 2D
+[2025-06-27 08:11:10] Player C played: PASS
+[2025-06-27 08:11:14] Player D hand: 4S, 4H, 6D, 7C, 8S, 8C, 10C, 10D, JC, AS
+[2025-06-27 08:11:14] Player D played: PASS
+[2025-06-27 08:11:16] Player A hand: 3C, 7H, QC, KS, KH, AD, AH, 2S, 2H
+[2025-06-27 08:11:16] Player A played: AD
+[2025-06-27 08:11:19] Player B hand: 3H, 5C, 6H, 8H, 9H, 10H, JD, KC, 2C
+[2025-06-27 08:11:19] Player B played: PASS
+[2025-06-27 08:11:20] Player C hand: 4D, 5D, 5H, 6S, 9C, 9D, QD, QH, KD, 2D
+[2025-06-27 08:11:20] Player C played: PASS
+[2025-06-27 08:11:21] Player D hand: 4S, 4H, 6D, 7C, 8S, 8C, 10C, 10D, JC, AS
+[2025-06-27 08:11:21] Player D played: PASS
+[2025-06-27 08:11:23] Player A hand: 3C, 7H, QC, KS, KH, AH, 2S, 2H
+[2025-06-27 08:11:23] Player A played: 3C
+[2025-06-27 08:11:25] Player B hand: 3H, 5C, 6H, 8H, 9H, 10H, JD, KC, 2C
+[2025-06-27 08:11:25] Player B played: 3H
+[2025-06-27 08:11:27] Player C hand: 4D, 5D, 5H, 6S, 9C, 9D, QD, QH, KD, 2D
+[2025-06-27 08:11:27] Player C played: PASS
+[2025-06-27 08:11:29] Player D hand: 4S, 4H, 6D, 7C, 8S, 8C, 10C, 10D, JC, AS
+[2025-06-27 08:11:29] Player D played: 4S
+[2025-06-27 08:11:30] Player A hand: 7H, QC, KS, KH, AH, 2S, 2H
+[2025-06-27 08:11:30] Player A played: 7H
+[2025-06-27 08:11:31] Player B hand: 5C, 6H, 8H, 9H, 10H, JD, KC, 2C
+[2025-06-27 08:11:31] Player B played: PASS
+[2025-06-27 08:11:33] Player C hand: 4D, 5D, 5H, 6S, 9C, 9D, QD, QH, KD, 2D
+[2025-06-27 08:11:33] Player C played: PASS
+[2025-06-27 08:11:34] Player D hand: 4H, 6D, 7C, 8S, 8C, 10C, 10D, JC, AS
+[2025-06-27 08:11:34] Player D played: PASS
+[2025-06-27 08:11:36] Player A hand: QC, KS, KH, AH, 2S, 2H
+[2025-06-27 08:11:36] Player A played: QC
+[2025-06-27 08:11:37] Player B hand: 5C, 6H, 8H, 9H, 10H, JD, KC, 2C
+[2025-06-27 08:11:37] Player B played: KC
+[2025-06-27 08:11:39] Player C hand: 4D, 5D, 5H, 6S, 9C, 9D, QD, QH, KD, 2D
+[2025-06-27 08:11:39] Player C played: KD

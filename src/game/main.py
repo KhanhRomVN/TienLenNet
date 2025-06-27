@@ -1,3 +1,13 @@
+import time
+def debug_log(msg):
+    t = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open("debug_tienlen.log", "a") as f:
+        f.write(f"[{t}] {msg}\n")
+
+def history_log(msg):
+    t = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open("tienlen_history.log", "a") as f:
+        f.write(f"[{t}] {msg}\n")
 from dotenv import load_dotenv
 load_dotenv()
 import sys
@@ -108,11 +118,8 @@ class TienLenGame:
 
         # Ensure LLM_MODEL is always set before initialize_players
         self.initialize_players()
-        # Debug print for each player and ai_agent
-        print("[DEBUG] Player assignments after init:")
         for player in self.players:
             agent = getattr(self, 'ai_agents', {}).get(player.id, None)
-            print(f"  Player {player.name} (id={player.id}) | is_ai={player.is_ai} | ai_agent={type(agent)}")
 
     def get_player_by_id(self, player_id):
         """Return the player object matching player_id. Return None if not found."""
@@ -227,7 +234,6 @@ class TienLenGame:
 
     def play_cards(self):
         import traceback
-        print("[PLAY LOG] ------- play_cards CALLED -------")
         traceback.print_stack(limit=8)
         print(f"[PLAY LOG] --> Called for current_player_id={self.current_player_id}")
         current_player = self.get_player_by_id(self.current_player_id)
@@ -243,7 +249,23 @@ class TienLenGame:
             self.log_move(current_player, selected_cards if selected_cards else None)
         
         # Validate lại trước khi thực thi
-        if not current_player.can_play_cards(selected_cards, self.last_played_cards):
+        game_first_turn = (self.game_count == 1 and not self.last_played_cards)
+        if not current_player.can_play_cards(selected_cards, self.last_played_cards, game_first_turn):
+            # >> Log all invalid move attempts for LLM debugging
+            print("[INVALID MOVE] Detected!")
+            print(f"  [INVALID MOVE] Player: {current_player.name} (AI={current_player.is_ai})")
+            print(f"  [INVALID MOVE] Attempted Cards: {[str(c) for c in selected_cards]}")
+            print(f"  [INVALID MOVE] Table: {[str(c) for c in self.last_played_cards]}")
+            print(f"  [INVALID MOVE] Game First Turn: {game_first_turn}")
+            print(f"  [INVALID MOVE] Cards on hand: {[str(c) for c in current_player.hand]}")
+            # Always clear selection after an invalid move, both for AI and human
+            current_player.clear_selection()
+            # Nếu không hợp lệ nhưng là lượt đầu, reset lại hiển thị và selection
+            if game_first_turn:
+                self.center_cards = []
+                self.center_cards_pos = []
+                self.arrange_center_cards()
+                return
             # Chỉ clear center_cards (hiển thị bài sai) nếu đã từng có bài trên bàn/lượt chặn,
             # Còn lượt đầu, không clear tức là giữ nguyên trạng thái bàn
             if self.last_played_cards:
@@ -259,13 +281,19 @@ class TienLenGame:
             return
 
         # Ghi lại lịch sử
+        move_str = ", ".join([f"{c.rank}{c.suit[0].upper()}" for c in selected_cards])
         self.move_history.append({
             'player': current_player.name,
             'move': [f"{c.rank}{c.suit[0].upper()}" for c in selected_cards]
         })
+        # Log player hand before playing
+        hand_str = ", ".join([f"{c.rank}{c.suit[0].upper()}" for c in current_player.hand])
+        history_log(f"{current_player.name} hand: {hand_str}")
         current_player.remove_cards(selected_cards)
         self.last_played_cards = selected_cards
         self.last_played_by = current_player.id
+        move_str = ", ".join([f"{c.rank}{c.suit[0].upper()}" for c in selected_cards])
+        history_log(f"{current_player.name} played: {move_str}")
         print(f"[PLAY LOG] Setting last_played_by={self.last_played_by} after play by {current_player.name} (id={current_player.id})")
         self.center_cards = selected_cards
         self.arrange_center_cards()  # luôn cập nhật vị trí bài
@@ -326,7 +354,14 @@ class TienLenGame:
 
         # Không cho PASS nếu bàn đang trống (không có bài trên bàn)!
         if not self.last_played_cards:
-            print("[PASS LOG] Forbidden: Attempted to PASS when no cards on the table (new round). PASS ignored.")
+            print("[PASS LOG] Forbidden: Attempted to PASS when no cards on table")
+            # Force player to play a card (fallback)
+            if current_player and current_player.hand:
+                current_player.sort_hand()
+                card = current_player.hand[0]
+                card.selected = True
+                print(f"[PASS LOG] Fallback: Auto-playing smallest card {card.rank}{card.suit[0].upper()} for {current_player.name}")
+                self.play_cards()
             return
 
         print(f"[PASS LOG] Player {current_player.name} (id={current_player.id}) initiates PASS.")
@@ -339,6 +374,10 @@ class TienLenGame:
         current_player.passed = True
         current_player.clear_selection()
         current_player.update_after_pass()
+        # Log PASS action in history log
+        hand_str = ", ".join([f"{c.rank}{c.suit[0].upper()}" for c in current_player.hand])
+        history_log(f"{current_player.name} hand: {hand_str}")
+        history_log(f"{current_player.name} played: PASS")
 
         print(f"  [PASS LOG] After pass flag: passed_player_ids={self.passed_player_ids}")
         print(f"  [PASS LOG] Players state:")
@@ -371,8 +410,7 @@ class TienLenGame:
             else:
                 self.current_player_id = last_valid_player
                 print(f"[PASS LOG] Now setting current_player_id={self.current_player_id} after table reset.")
-            # Safe to clear last_played_by now
-            self.last_played_by = None
+            # FIX: Do NOT clear last_played_by here!
             self.passed_player_ids = []
             for p in self.players:
                 p.passed = False
@@ -584,6 +622,7 @@ class TienLenGame:
             self.prepare_new_game()
 
             while self.running:
+                step_start = time.time()
                 current_player = self.get_player_by_id(self.current_player_id)
 
                 if current_player.is_ai:
@@ -592,20 +631,24 @@ class TienLenGame:
                         # Determine if this is the first turn for move validation
                         game_first_turn = (self.game_count == 1 and not self.last_played_cards)
                         if isinstance(agent, GeminiAgent):
-                            llm_action = agent.select_action(self, current_player)
-                            if llm_action == "PASS":
-                                self.pass_turn()  # This updates game state
-                            else:
-                                # Validate move before playing
-                                if current_player.can_play_cards(llm_action, self.last_played_cards, game_first_turn):
-                                    # Select the cards in player's hand
+                            retry_count = 0
+                            max_retries = 2
+                            while retry_count < max_retries:
+                                llm_action = agent.select_action(self, current_player)
+                                if llm_action == "PASS":
+                                    self.pass_turn()
+                                    break
+                                elif current_player.can_play_cards(llm_action, self.last_played_cards, game_first_turn):
                                     for card in current_player.hand:
                                         card.selected = (card in llm_action)
-                                    # Play the cards - this updates game state
                                     self.play_cards()
+                                    break
                                 else:
-                                    print(f"[MAIN] Invalid move by {current_player.name}, forcing PASS")
-                                    self.pass_turn()
+                                    print(f"[MAIN] Invalid move by {current_player.name}, retrying... ({retry_count+1} of {max_retries})")
+                                    retry_count += 1
+                            if retry_count >= max_retries:
+                                print(f"[MAIN] Maximum retries exceeded for {current_player.name}, forcing PASS")
+                                self.pass_turn()
                         else:
                             # RL or other agent logic
                             action_id = agent.select_action(self)
@@ -638,21 +681,21 @@ class TienLenGame:
             traceback.print_exc()
 
     def rotate_player_positions(self):
-        # Luôn xoay thứ tự danh sách self.players, người tới lượt sẽ luôn là index 0
+        # Safeguard against missing players
+        if not hasattr(self, 'players') or not self.players:
+            print("[ERROR] Cannot rotate positions: players not initialized")
+            return
+
+        # Always rotate so that current player is first
         positions = ['bottom', 'right', 'top', 'left']
         num_players = len(self.players)
-        if num_players == 4:
-            idx = None
-            for i, player in enumerate(self.players):
-                if player.id == self.current_player_id:
-                    idx = i
-                    break
-            if idx is not None:
-                # Dịch vòng self.players để current_player ở đầu
-                self.players = self.players[idx:] + self.players[:idx]
-                for i, player in enumerate(self.players):
-                    player.position = positions[i]
-        # Log vị trí các player sau xoay để debug dễ
+        idx = next((i for i, p in enumerate(self.players) if p.id == self.current_player_id), 0)
+        self.players = self.players[idx:] + self.players[:idx]
+        # Assign new positions (circular)
+        for i, player in enumerate(self.players):
+            if i < len(positions):
+                player.position = positions[i]
+        # Log player positions after rotation
         print("[LOG] Vị trí người chơi sau khi xoay:")
         for p in self.players:
             print(f"    {p.name} (id={p.id}): {p.position} | is_turn={p.is_turn}")
@@ -660,13 +703,9 @@ class TienLenGame:
     def reset_table(self):
         print("[RESET LOG] ------- reset_table CALLED -------")
         print(f"[RESET LOG] Table state before reset: passed_player_ids={self.passed_player_ids}")
-        # --- CANONICALIZE ORDER before any rotate/assignment! ---
-        if hasattr(self, "seat_order"):
-            id_to_player = {p.id: p for p in self.players}
-            self.players = [id_to_player[pid] for pid in self.seat_order]
-            print("[RESET LOG] Canonical player order:", [p.name for p in self.players])
+        # CHỈ reset state, không thay đổi thứ tự người chơi
         self.last_played_cards = []
-        self.last_played_by = None
+        # KHÔNG reset last_played_by
         self.center_cards = []
         self.arrange_center_cards()
         self.consecutive_passes = 0
@@ -677,6 +716,9 @@ class TienLenGame:
 
     def prepare_new_game(self):
         """Prepare a new game: deal cards, reset state, find starter."""
+        # Clear history log on new game
+        with open("tienlen_history.log", "w") as f:
+            pass
         self.game_count += 1
         self.reset_table()
         self.deck = GameLogic.create_deck()

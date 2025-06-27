@@ -246,31 +246,93 @@ class Player:
                 return True
         return False
 
-    def can_play_cards(self, selected_cards: List[Card], last_played_cards: List[Card] = None) -> bool:
+    def can_play_cards(self, selected_cards: List[Card], last_played_cards: List[Card] = None, game_first_turn: bool = False) -> bool:
         if not selected_cards:
             return False
 
-        # Kiểm tra combo hợp lệ cho lượt đầu ván (nếu chưa có bài trên bàn)
-        if not last_played_cards:
-            # SỬA: Chỉ yêu cầu combo hợp lệ, không yêu cầu 3♠
+        # Cho phép đánh combo bất kỳ hợp lệ bằng validate_selection trên lượt đầu tiên của ván nếu không có combo trên bàn
+        if not last_played_cards and game_first_turn:
             return self.validate_selection(selected_cards)
+
+        # Khi bàn trống (không có bài trên bàn)
+        if not last_played_cards:
+            # Khi bàn trống: cấm đánh bài 2, trừ trường hợp bài trên tay đều là 2
+            if any(card.rank == '2' for card in selected_cards):
+                if not all(card.rank == '2' for card in self.hand):
+                    print(f"[VALIDATION] Invalid move by {self.name}:")
+                    print(f"  Selected: {[str(c) for c in selected_cards]}")
+                    print("  Table is empty")
+                    print("  Reason: Cannot play '2' unless all cards in hand are '2'")
+                    return False
+            # Nếu là lượt đầu tiên của ván và người chơi có 3♠, thì bắt buộc phải đánh 3♠
+            if game_first_turn:
+                has_3_spades = any(card.rank == '3' and card.suit == 'spades' for card in self.hand)
+                if has_3_spades:
+                    if not any(card.rank == '3' and card.suit == 'spades' for card in selected_cards):
+                        print(f"[VALIDATION] Invalid move by {self.name}:")
+                        print(f"  Selected: {[str(c) for c in selected_cards]}")
+                        print("  Table is empty (first turn with 3♠ in hand)")
+                        print("  Reason: Player must play 3♠ on first turn")
+                        return False
+            # Không cho phép đánh 13 lá bài trong mọi trường hợp
+            if len(selected_cards) == 13:
+                print(f"[VALIDATION] Invalid move by {self.name}:")
+                print(f"  Selected: {[str(c) for c in selected_cards]}")
+                print("  Table is empty")
+                print("  Reason: Cannot play all 13 cards at once")
+                return False
+            valid = self.validate_selection(selected_cards)
+            if not valid:
+                print(f"[VALIDATION] Invalid move by {self.name}:")
+                print(f"  Selected: {[str(c) for c in selected_cards]}")
+                print("  Table is empty")
+                print(f"  Combo type: {self.get_combo_type(selected_cards)}")
+            return valid
 
         combo_type = self.get_combo_type(selected_cards)
         if combo_type == "INVALID":
+            print(f"[VALIDATION] Invalid move by {self.name}:")
+            print(f"  Selected: {[str(c) for c in selected_cards]}")
+            print(f"  Last played: {[str(c) for c in last_played_cards]}")
+            print(f"  Combo type: {combo_type} vs previous: {self.get_combo_type(last_played_cards)}")
+            print("  Reason: Selected cards do not form a valid combo")
             return False
         prev_combo_type = self.get_combo_type(last_played_cards)
         # Special beating rules
         if prev_combo_type == "FOUR_OF_A_KIND":
             if combo_type not in ["FOUR_OF_A_KIND", "PAIRS_STRAIGHT"]:
+                print(f"[VALIDATION] Invalid move by {self.name}:")
+                print(f"  Selected: {[str(c) for c in selected_cards]}")
+                print(f"  Last played: {[str(c) for c in last_played_cards]}")
+                print(f"  Combo type: {combo_type} vs previous: {prev_combo_type}")
+                print("  Reason: Must beat FOUR_OF_A_KIND with FOUR_OF_A_KIND or PAIRS_STRAIGHT")
                 return False
         elif prev_combo_type == "PAIRS_STRAIGHT":
             if combo_type not in ["PAIRS_STRAIGHT", "FOUR_OF_A_KIND"]:
+                print(f"[VALIDATION] Invalid move by {self.name}:")
+                print(f"  Selected: {[str(c) for c in selected_cards]}")
+                print(f"  Last played: {[str(c) for c in last_played_cards]}")
+                print(f"  Combo type: {combo_type} vs previous: {prev_combo_type}")
+                print("  Reason: Must beat PAIRS_STRAIGHT with PAIRS_STRAIGHT or FOUR_OF_A_KIND")
                 return False
         elif combo_type != prev_combo_type:
+            print(f"[VALIDATION] Invalid move by {self.name}:")
+            print(f"  Selected: {[str(c) for c in selected_cards]}")
+            print(f"  Last played: {[str(c) for c in last_played_cards]}")
+            print(f"  Combo type: {combo_type} vs previous: {prev_combo_type}")
+            print("  Reason: Combo types do not match")
             return False
-        return self.compare_combinations(selected_cards, last_played_cards) > 0
+        result = self.compare_combinations(selected_cards, last_played_cards) > 0
+        if not result:
+            print(f"[VALIDATION] Invalid move by {self.name}:")
+            print(f"  Selected: {[str(c) for c in selected_cards]}")
+            print(f"  Last played: {[str(c) for c in last_played_cards]}")
+            print(f"  Combo type: {combo_type} vs previous: {prev_combo_type}")
+            print("  Reason: Combo not strong enough to beat last played")
+        return result
 
-    def get_combo_type(self, cards: List[Card]) -> str:
+    @staticmethod
+    def get_combo_type(cards: List[Card]) -> str:
         if not cards:
             return "INVALID"
         # Block any 13-card play (cannot play whole hand in one move)
@@ -278,18 +340,28 @@ class Player:
             return "INVALID"
         from collections import Counter
         n = len(cards)
-        rank_counts = Counter(c.rank for c in cards)
-        unique_ranks = set(rank_counts.keys())
+        ranks = [c.rank for c in cards]
+        unique_ranks = set(ranks)
+        rank_counts = Counter(ranks)
         rank_indices = sorted([Card.RANKS.index(r) for r in unique_ranks])
-        if n == 1: return "SINGLE"
-        if n == 2 and len(unique_ranks) == 1: return "PAIR"
-        if n == 3 and len(unique_ranks) == 1: return "THREE"
-        if n == 4 and len(unique_ranks) == 1: return "FOUR_OF_A_KIND"
+
+        # Cho phép đánh các combo cơ bản 1-4 lá
+        if n == 1:
+            return "SINGLE"
+        if n == 2 and len(unique_ranks) == 1:
+            return "PAIR"
+        if n == 3 and len(unique_ranks) == 1:
+            return "THREE"
+        if n == 4 and len(unique_ranks) == 1:
+            return "FOUR_OF_A_KIND"
+
+        # Kiểm tra sảnh (straight)
         if n >= 3:
-            if (len(unique_ranks) == n and all(rank_indices[i]+1==rank_indices[i+1] for i in range(len(rank_indices)-1))):
+            if len(unique_ranks) == n and all(rank_indices[i]+1 == rank_indices[i+1] for i in range(len(rank_indices)-1)):
                 if Card.RANKS.index('2') in rank_indices[:-1]:
                     return "INVALID"
                 return "STRAIGHT"
+        # Đôi thông (pairs straight)
         if n >= 6 and n % 2 == 0:
             if all(count == 2 for count in rank_counts.values()):
                 if all(rank_indices[i]+1==rank_indices[i+1] for i in range(len(rank_indices)-1)):
@@ -298,7 +370,8 @@ class Player:
                     return "PAIRS_STRAIGHT"
         return "INVALID"
 
-    def compare_combinations(self, cards1: List[Card], cards2: List[Card]) -> int:
+    @staticmethod
+    def compare_combinations(cards1: List[Card], cards2: List[Card]) -> int:
         if len(cards1) in [1, 2, 3]:
             max1 = max(cards1)
             max2 = max(cards2)
@@ -323,7 +396,6 @@ class Player:
 
     # UI/interaction -------------
     def handle_click(self, pos, last_played_cards=None, game_first_turn=False):
-        print(f"[CLICK] pos={pos} | is_turn={self.is_turn} | passed={self.passed}")
         if self.is_turn and not self.passed and not getattr(self, 'is_ai', False):
             for card in sorted(self.hand, key=lambda c: c.z_index, reverse=True):
                 if card.rect.collidepoint(pos):
