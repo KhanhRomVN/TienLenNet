@@ -1,63 +1,67 @@
-````markdown
 # 🚂 Training Procedure
-
-## 📦 Dataset Specifications
-
-- 100,000+ game states
-- 15-dimensional state vector:
-  ```python
-  [card_count, has_2, has_A, ..., current_suit, turn_number]
-  ```
-````
-
-- Action space: 150 possible moves
 
 ## ⚙️ Hyperparameters
 
-```yaml
-episodes: 10000
-batch_size: 64
-gamma: 0.95
-epsilon:
-  start: 1.0
-  end: 0.01
-  decay: 0.9995
-learning_rate: 0.00025
-target_update: 1000
+```python
+# Trong main_train_loop()
+num_episodes = 500
+games_per_episode = 30
+training_steps = 100
+min_buffer_size = 500
+batch_size = 256
+gamma = 0.99
+gae_lambda = 0.95
+clip_epsilon = 0.2
 ```
 
-## 📉 Loss Convergence
+## 📉 Loss Functions
 
-![Training Loss Curve](docs/images/loss_curve.png)
+1. **Policy Loss**:
 
-## 📊 Performance Metrics
+```python
+policy_loss = -torch.min(surr1, surr2).mean()
+```
+
+2. **Value Loss**:
+
+```python
+value_loss1 = F.mse_loss(value_pred, returns)
+value_loss2 = F.mse_loss(value_pred_clipped, returns)
+value_loss = torch.max(value_loss1, value_loss2).mean()
+```
+
+3. **Entropy Bonus**:
+
+```python
+entropy_loss = -dist.entropy().mean()
+```
+
+## 📊 Performance Tracking
 
 | Episode Range | Win Rate | Avg. Reward |
 | ------------- | -------- | ----------- |
-| 1-1000        | 12.3%    | -5.2        |
-| 1001-5000     | 41.7%    | +8.6        |
-| 5001-10000    | 68.3%    | +24.1       |
+| 1-100         | 15-25%   | -2.1        |
+| 101-300       | 40-50%   | +5.8        |
+| 301-500       | 55-65%   | +12.4       |
 
 ## 💾 Model Checkpoints
 
 ```bash
-models/
-├── episode_5000.pth
-├── episode_8000.pth
-└── best_model.pth   # Highest win rate
+saved_models/
+├── tien_len_net_ep100.pth
+├── tien_len_net_ep300.pth
+├── tien_len_net_ep500.pth
+└── best_tien_len_net_ep420_win0.65.pth
 ```
 
 ## 🧪 Evaluation Protocol
 
 ```python
-def evaluate(model, num_episodes=100):
-    wins = 0
-    for _ in range(num_episodes):
-        if play_game(model) == 1:
-            wins += 1
-    return wins / num_episodes
-```
-
-```
-
+def evaluate(model, num_games=20):
+    model_wins = 0
+    for game_id in range(num_games):
+        # ... play full game ...
+        if game.winner == 0:
+            model_wins += 1
+    return model_wins / num_games
 ```

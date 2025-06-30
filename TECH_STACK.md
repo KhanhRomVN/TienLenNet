@@ -1,45 +1,38 @@
-````markdown
 # 🛠 Technology Stack
 
 ## 📚 Core Libraries
 
-| Library    | Version | Purpose                  |
-| ---------- | ------- | ------------------------ |
-| PyTorch    | 2.0+    | Deep Learning Framework  |
-| NumPy      | 1.22+   | Scientific Computing     |
-| Gymnasium  | 0.28+   | RL Environment Interface |
-| Matplotlib | 3.7+    | Visualization            |
-| tqdm       | 4.65+   | Progress Bars            |
+| Library | Version | Purpose                 |
+| ------- | ------- | ----------------------- |
+| PyTorch | 2.0+    | Deep Learning Framework |
+| NumPy   | 1.22+   | Scientific Computing    |
+| tqdm    | 4.65+   | Progress Monitoring     |
+| lz4     | 4.0+    | Data Compression        |
+| pyarrow | 14.0+   | Efficient Data Storage  |
 
 ## 🖥️ Hardware Requirements
 
-| Component | Recommended                 |
-| --------- | --------------------------- |
-| CPU       | 4+ cores                    |
-| RAM       | 16GB+                       |
-| GPU       | NVIDIA GTX 1660+ (Optional) |
-| Storage   | 10GB free                   |
+| Component | Recommended         |
+| --------- | ------------------- |
+| CPU       | 4+ cores (Intel i7) |
+| RAM       | 16GB+               |
+| GPU       | NVIDIA RTX 3060+    |
+| Storage   | SSD 256GB+          |
 
 ## 🧩 System Architecture
 
 ```mermaid
 graph LR
-    A[Game Environment] --> B(RL Agent)
-    B --> C[Experience Replay]
-    C --> D[Neural Network]
-    D --> E[Optimizer]
-    E --> B
-```
-````
-
-## 🧪 Testing Framework
-
-| Tool       | Coverage            |
-| ---------- | ------------------- |
-| pytest     | Core game logic     |
-| unittest   | Agent functionality |
-| pytest-cov | 85%+ code coverage  |
-
+    A[Game Environment] --> B(MCTS)
+    B --> C[Neural Network]
+    C --> D[PPO Training]
+    D --> E[Model Update]
+    E --> A
 ```
 
-```
+## 🧪 Key Features
+
+- **State Representation**: Tensor 6x4x13
+- **Action Space**: 200 possible moves
+- **Training**: PPO with Generalized Advantage Estimation
+- **Efficiency**: LZ4 compression for experience replay
