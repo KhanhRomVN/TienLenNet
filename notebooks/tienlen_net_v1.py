@@ -324,14 +324,16 @@ class TienLenGame:
                     if (hand_card.suit, hand_card.rank) == (card.suit, card.rank):
                         del player.hand[idx]
                         break  # Only remove one instance
-            # Set new current combo using helper
-            self.set_current_combo((action_type, cards))
-            # Check if player won (immediately after making a move)
+            # Check for win AFTER removal!
             if len(player.hand) == 0:
                 self.done = True
                 self.winner = self.current_player
                 reward = 10 if self.current_player == 0 else -1
-                return None, reward, True, {}
+                # Set the last combo for logs/scoring if needed
+                self.set_current_combo((action_type, cards))
+                return self.get_state(), reward, True, {}
+            # Only set current combo if not win
+            self.set_current_combo((action_type, cards))
         else:
             # Only allow PASS if there's a current combo to pass on
             if self.current_combo is None:
