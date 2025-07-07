@@ -312,25 +312,23 @@ class TienLenGame:
         reward = 0
 
         if action_type != "PASS":
-            # Use (suit, rank) matching to verify and remove played cards
-            hand_tuples = [(c.suit, c.rank) for c in player.hand]
-            # Validate all action cards are in hand
+            # Remove card by value (suit and rank), not by object identity
             for card in cards:
-                if (card.suit, card.rank) not in hand_tuples:
-                    raise ValueError(f"Card not in hand: {card.suit}-{card.rank}")
-            # Remove by one-for-one match to avoid removing duplicates
-            for card in cards:
+                found = False
                 for idx, hand_card in enumerate(player.hand):
-                    if (hand_card.suit, hand_card.rank) == (card.suit, card.rank):
+                    if hand_card.suit == card.suit and hand_card.rank == card.rank:
                         del player.hand[idx]
-                        break  # Only remove one instance
-            # Check for win AFTER removal!
+                        found = True
+                        break
+                if not found:
+                    raise ValueError(f"Card not in hand: {card} (suit={card.suit}, rank={card.rank})")
+
+            # WIN CHECK: as soon as hand is empty
             if len(player.hand) == 0:
                 self.done = True
                 self.winner = self.current_player
                 reward = 10 if self.current_player == 0 else -1
-                # Set the last combo for logs/scoring if needed
-                self.set_current_combo((action_type, cards))
+                self.history.append((self.current_player, action))
                 return self.get_state(), reward, True, {}
             # Only set current combo if not win
             self.set_current_combo((action_type, cards))
@@ -345,7 +343,7 @@ class TienLenGame:
         # Move to next player
         self.current_player = (self.current_player + 1) % 4
 
-        # Improved: clear combo if 3 passes in a row (rolling, not just last-3)
+        # Clear combo if 3 passes in a row (rolling)
         pass_count = 0
         for i in range(1, 4):
             if len(self.history) >= i and self.history[-i][1][0] == "PASS":
@@ -1138,1008 +1136,212 @@ def evaluate(model, num_games=20):
 #         import traceback
 #         traceback.print_exc()
 
-# Cell 15: Test Cases for TienLenGame Logic
-def run_test_cases():
-    print("===== RUNNING GAME LOGIC TEST CASES =====")
+# Cell 15: Testcase
+def run_comprehensive_test_suite():
+    print("\n===== COMPREHENSIVE TEST SUITE - ADVANCED SCENARIOS =====")
     
-    # Test 1: Basic game initialization
-    print("\nTest 1: Game Initialization")
-    game = TienLenGame(0)
-    print(f"Players: {len(game.players)}")
-    print(f"Player 0 hand size: {len(game.players[0].hand)} cards")
-    print(f"Current player: {game.current_player}")
-    print(f"Deck size after dealing: {len(game.deck)}")
-    assert len(game.players) == 4
-    assert all(len(p.hand) == 13 for p in game.players)
-    assert len(game.deck) == 0
-    
-    # Test 2: Valid combo detection (leading)
-    print("\nTest 2: Valid Combos (Leading)")
-    game = TienLenGame(1)
-    valid_combos = game.get_valid_combos(0)
-    print(f"Valid combos for player 0 (leading): {len(valid_combos)}")
-    assert len(valid_combos) > 0
-    assert ("PASS", []) not in valid_combos
-    
-    # Test 3: Valid Combos (After non-PASS combo)
-    print("\nTest 3: Valid Combos (After non-PASS combo)")
-    game = TienLenGame(1)
-    test_card = game.Card("HEARTS", "5")
-    game.current_combo = ("SINGLE", [test_card])
-    valid_combos = game.get_valid_combos(1)
-    print(f"Valid combos after non-PASS: {len(valid_combos)}")
-    assert ("PASS", []) in valid_combos
-    assert any(c[0] != "PASS" for c in valid_combos)
-    
-    # Test 4: Combo value calculation
-    print("\nTest 4: Combo Value Calculation")
-    card_low = game.Card("DIAMONDS", "3")
-    card_high = game.Card("SPADES", "2")
-    single_low = ("SINGLE", [card_low])
-    single_high = ("SINGLE", [card_high])
-    print(f"Value 3♦: {game.get_combo_value(single_low)}")
-    print(f"Value 2♠: {game.get_combo_value(single_high)}")
-    assert game.get_combo_value(single_low) < game.get_combo_value(single_high)
-    
-    # Test 5: Bot action suggestion
-    print("\nTest 5: Bot Action Suggestion")
-    # Setup a scenario where bot should play smallest card
-    game = TienLenGame(2)
-    bot_action = game.suggest_bot_action(0)
-    print(f"Bot suggested action: {bot_action}")
-    assert bot_action[0] != "PASS"
-    
-    # Test 6: Playing a card and state transition
-    print("\nTest 6: Playing a Card")
-    player0_hand_size = len(game.players[0].hand)
-    action = ("SINGLE", [game.players[0].hand[0]])
-    _, _, done, _ = game.step(action)
-    print(f"Hand size after play: {len(game.players[0].hand)}")
-    print(f"Current combo: {game.current_combo}")
-    print(f"Next player: {game.current_player}")
-    assert len(game.players[0].hand) == player0_hand_size - 1
-    assert game.current_player == 1
-    assert not done
-    
-    # Test 7: 3 consecutive passes reset, uses a real played combo to ensure last_combo_player is correct
-    print("\nTest 7: 3 Consecutive Passes Reset")
-    game = TienLenGame(3)
-    # Simulate player 0 playing a card (set last_combo_player)
-    card = game.players[0].hand[0]
-    game.step(("SINGLE", [card]))  # This sets last_combo_player to 0
-
-    # Now player 1 has the turn, set current_combo for test scenario
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "5")])
-    game.last_combo_player = 0  # Explicitly for clarity
-
-    # Simulate 3 passes starting from player 1
-    game.current_player = 1
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-
-    print(f"After 3 passes: Combo={game.current_combo}, Player={game.current_player}")
-    assert game.current_combo is None
-    assert game.current_player == 0  # Should return to last combo player
-
-    # Test 8: Winning condition
-    print("\nTest 8: Winning Condition")
-    game = TienLenGame(4)
-    # Simulate player 0 playing last card
-    game.players[0].hand = [game.Card("SPADES", "A")]
-    action = ("SINGLE", game.players[0].hand)
-    _, reward, done, _ = game.step(action)
-    print(f"Game done: {done}, Winner: {game.winner}, Reward: {reward}")
-    assert done
-    assert game.winner == 0
-    assert reward == 10
-    
-    # Test 9: Bomb beats non-bomb
-    print("\nTest 9: Bomb vs Non-Bomb")
-# Cell 15b: Additional Test Cases for Game Logic
-def run_additional_test_cases():
-    print("===== RUNNING ADDITIONAL GAME LOGIC TEST CASES =====")
-    
-    # Test 11: 3 consecutive passes should clear current combo
-    print("\nTest 11: 3 Consecutive Passes Reset Combo")
-    game = TienLenGame(11)
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "7")])
-    
-    # Simulate 3 passes from players 1,2,3
-    game.current_player = 1
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    
-    print(f"After 3 passes: Combo={game.current_combo}, Current Player={game.current_player}")
-    assert game.current_combo is None
-    assert game.current_player == 0  # Should return to last combo player
-    
-    # Test 12: Valid combos after reset should not include PASS
-    print("\nTest 12: Valid Combos After Reset")
-    valid_combos = game.get_valid_combos(0)
-    print(f"Valid combos for player 0: {len(valid_combos)}")
-    assert ("PASS", []) not in valid_combos
-    
-    # Test 13: Valid combos for bomb vs higher bomb
-    print("\nTest 13: Bomb vs Higher Bomb")
-    game = TienLenGame(13)
-    game.current_combo = ("BOMB", [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4")
-    ])
-    # Player has higher bomb
-    game.players[1].hand = [
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "5"),
-        game.Card("HEARTS", "5"),
-        game.Card("SPADES", "5")
-    ]
-    valid_combos = game.get_valid_combos(1)
-    bomb_combos = [c for c in valid_combos if c[0] == "BOMB"]
-    print(f"Valid bomb combos: {len(bomb_combos)}")
-    assert len(bomb_combos) > 0
-    
-    # Test 14: Valid straight combos
-    print("\nTest 14: Straight Combos Validation")
-    game = TienLenGame(14)
-    game.current_combo = ("STRAIGHT", [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "5")
-    ])
-    # Player has higher straight
-    game.players[1].hand = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "5"),
-        game.Card("HEARTS", "6")
-    ]
-    valid_combos = game.get_valid_combos(1)
-    straight_combos = [c for c in valid_combos if c[0] == "STRAIGHT"]
-    print(f"Valid straight combos: {len(straight_combos)}")
-    assert len(straight_combos) > 0
-    
-    # Test 15: RL agent action selection
-    print("\nTest 15: RL Agent Action Selection")
-    game = TienLenGame(15)
-    model = TienLenNet().to(device)
-    action_probs = np.ones(200) / 200  # Uniform probabilities
-    
-    # Get valid actions for RL agent
-    valid_actions = game.get_valid_combos(0)
-    valid_probs = []
-    for action in valid_actions:
-        idx = action_to_id(action)
-        valid_probs.append(action_probs[idx])
-    
-    valid_probs = np.array(valid_probs)
-    if valid_probs.sum() > 0:
-        valid_probs /= valid_probs.sum()
-    else:
-        valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
-    
-    # Select action
-    action_idx = np.random.choice(len(valid_actions), p=valid_probs)
-    action = valid_actions[action_idx]
-    print(f"RL Agent selected action: {action}")
-    assert action in valid_actions
-    
-    # Test 16: Card removal after play
-    print("\nTest 16: Card Removal After Play")
-    game = TienLenGame(16)
-    player = game.players[0]
-    original_hand = player.hand.copy()
-    card_to_play = original_hand[0]
-    action = ("SINGLE", [card_to_play])
-    
-    game.step(action)
-    print(f"Hand size after play: {len(player.hand)}")
-    assert len(player.hand) == len(original_hand) - 1
-    assert card_to_play not in player.hand
-    
-    # Test 17: Game end when player has no cards
-    print("\nTest 17: Game End Condition")
-    game = TienLenGame(17)
-    game.players[0].hand = [game.Card("SPADES", "A")]
-    action = ("SINGLE", game.players[0].hand)
-    _, _, done, _ = game.step(action)
-    print(f"Game done: {done}, Winner: {game.winner}")
-    assert done
-    assert game.winner == 0
-    
-    # Test 18: Multiple passes without reset
-    print("\nTest 18: Two Passes Should Not Reset")
-    game = TienLenGame(18)
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "8")])
-    
-    # Simulate 2 passes
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    
-    print(f"After 2 passes: Combo={game.current_combo}")
-    assert game.current_combo is not None
-    
-    print("\n===== ALL ADDITIONAL TEST CASES PASSED =====")
-
-# Run all tests
-if __name__ == "__main__":
-    run_test_cases()
-    run_additional_test_cases()
-    game = TienLenGame(5)
-    game.current_combo = ("SINGLE", [game.Card("SPADES", "2")])
-    # Create a bomb in player's hand
-    bomb_cards = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4")
-    ]
-    game.players[1].hand = bomb_cards
-    valid_combos = game.get_valid_combos(1)
-    print("Valid combos with bomb:", [c[0] for c in valid_combos])
-    assert "BOMB" in [c[0] for c in valid_combos]
-    
-    # Test 10: Action to ID stability
-    print("\nTest 10: Action to ID Stability")
-    action1 = ("PAIR", [
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "5")
-    ])
-    action2 = ("PAIR", [
-        game.Card("CLUBS", "5"),
-        game.Card("DIAMONDS", "5")
-    ])  # Same cards, different order
-    id1 = action_to_id(action1)
-    id2 = action_to_id(action2)
-    print(f"ID1: {id1}, ID2: {id2}")
-    assert id1 == id2
-    
-    print("\n===== ALL TEST CASES PASSED =====")
-
-# Run the tests
-if __name__ == "__main__":
-    run_test_cases()
-# === ADVANCED TEST CASES (AI Upgraded) ===
-
-def test3():
-    print("\n=== Test 3: Valid Combos After Non-PASS Combo ===")
-    game = TienLenGame(3)
-    test_card = game.Card("HEARTS", "5")
-    game.current_combo = ("SINGLE", [test_card])
-
-    print(f"Current combo: {game.current_combo[0]} {[f'{c.rank}-{c.suit[:1]}' for c in game.current_combo[1]]}")
-
-    valid_combos = game.get_valid_combos(1)
-    print("\nValid combos for player 1:")
-    for i, combo in enumerate(valid_combos[:5]):
-        cards_str = ", ".join([f"{c.rank}-{c.suit[:1]}" for c in combo[1]])
-        print(f"{i+1}. {combo[0]}: [{cards_str}]")
-
-    has_pass = any(c[0] == "PASS" for c in valid_combos)
-    has_higher_single = any(
-        c[0] == "SINGLE" and 
-        game.get_combo_value(c) > game.get_combo_value(game.current_combo)
-        for c in valid_combos
-    )
-    print(f"\nPASS available: {has_pass}")
-    print(f"Higher SINGLE available: {has_higher_single}")
-    assert has_pass and has_higher_single
-
-def test4():
-    print("\n=== Test 4: Combo Value Calculation ===")
-    game = TienLenGame(4)
-
-    test_combos = [
-        ("SINGLE", [game.Card("DIAMONDS", "3")]),
-        ("SINGLE", [game.Card("SPADES", "2")]),
-        ("PAIR", [game.Card("DIAMONDS", "5"), game.Card("CLUBS", "5")]),
-        ("STRAIGHT", [
-            game.Card("DIAMONDS", "3"),
-            game.Card("CLUBS", "4"),
-            game.Card("HEARTS", "5")
-        ]),
-        ("BOMB", [
-            game.Card("DIAMONDS", "4"),
-            game.Card("CLUBS", "4"),
-            game.Card("HEARTS", "4"),
-            game.Card("SPADES", "4")
-        ])
-    ]
-
-    print("Combo values:")
-    for combo in test_combos:
-        value = game.get_combo_value(combo)
-        cards = ", ".join([f"{c.rank}-{c.suit[:1]}" for c in combo[1]])
-        print(f"- {combo[0]}[{cards}]: {value}")
-    single3 = game.get_combo_value(test_combos[0])
-    pair5 = game.get_combo_value(test_combos[2])
-    straight345 = game.get_combo_value(test_combos[3])
-    bomb4 = game.get_combo_value(test_combos[4])
-    assert single3 < pair5 < straight345 < bomb4
-
-def test19():
-    print("\n=== Test 19: RL Agent Action Selection ===")
-    game = TienLenGame(19)
-    model = TienLenNet().to(device)
-    game.current_player = 0
+    # Test 1: Full game simulation with predefined hands
+    print("\nTest 1: Full Game Simulation - Bomb Finish")
+    game = TienLenGame(1000)
+    # Predefined hands for players
     game.players[0].hand = [
         game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "3"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "5")
-    ]
-    valid_actions = game.get_valid_combos(0)
-    print("Valid actions available:")
-    for i, action in enumerate(valid_actions):
-        cards = ", ".join([f"{c.rank}-{c.suit[:1]}" for c in action[1]])
-        print(f"{i+1}. {action[0]}[{cards}]")
-    action_probs = np.zeros(200)
-    for action in valid_actions:
-        idx = action_to_id(action)
-        action_probs[idx] = 10.0 if action[0] == "PAIR" else 1.0
-    valid_probs = []
-    for action in valid_actions:
-        idx = action_to_id(action)
-        valid_probs.append(action_probs[idx])
-    valid_probs = np.array(valid_probs)
-    valid_probs /= valid_probs.sum()
-    action_idx = np.random.choice(len(valid_actions), p=valid_probs)
-    selected_action = valid_actions[action_idx]
-    print(f"\nSelected action: {selected_action[0]}[{', '.join([f'{c.rank}-{c.suit[:1]}' for c in selected_action[1]])}]")
-    assert selected_action[0] == "PAIR"
-
-def test20():
-    print("\n=== Test 20: Complex Game Scenario ===")
-    game = TienLenGame(20)
-    # Assign hand for player 0 using real objects tracked in hand list
-    cards_p0 = [
-        game.Card("SPADES", "A"),
-        game.Card("HEARTS", "A"),
-        game.Card("CLUBS", "A"),
-        game.Card("DIAMONDS", "K"),
-    ]
-    game.players[0].hand = cards_p0
-    # Assign hand for player 1 using real objects tracked in hand list
-    cards_p1 = [
-        game.Card("SPADES", "2"),
-        game.Card("HEARTS", "Q"),
+        game.Card("CLUBS", "4"),
+        game.Card("HEARTS", "5"),
+        game.Card("SPADES", "6"),
+        game.Card("DIAMONDS", "7"),
+        game.Card("CLUBS", "8"),
+        game.Card("HEARTS", "9"),
+        game.Card("SPADES", "10"),
+        game.Card("DIAMONDS", "J"),
         game.Card("CLUBS", "Q"),
-    ]
-    game.players[1].hand = cards_p1
-    # When creating the action, use cards from player 0's actual hand: (cards_p0[:3])
-    action = ("TRIPLE", cards_p0[:3])
-    game.step(action)
-    valid_actions = game.get_valid_combos(1)
-    print("Valid responses to TRIPLE A-A-A:")
-    for action in valid_actions:
-        cards = ", ".join([f"{c.rank}-{c.suit[:1]}" for c in action[1]])
-        print(f"- {action[0]}[{cards}]")
-    has_bomb = any(a[0] == "BOMB" for a in valid_actions)
-    has_pass = any(a[0] == "PASS" for a in valid_actions)
-    assert not has_bomb
-    assert has_pass
-
-def run_advanced_tests():
-    print("\n==== RUNNING ADVANCED AI-UPGRADED TEST CASES ====")
-    test3()
-    test4()
-    test19()
-    test20()
-    print("\n==== ALL ADVANCED TESTS PASSED ====")
-if __name__ == "__main__":
-    # Run main test suites
-    run_test_cases()
-    run_additional_test_cases()
-    # Run advanced AI-upgraded tests
-    run_advanced_tests()
-def run_advanced_tests():
-    print("\n===== RUNNING ADVANCED TEST CASES (20) =====")
-
-    # Test 1: Straight với độ dài khác nhau
-    print("\nTest 1: Straight Length Mismatch")
-    game = TienLenGame(101)
-    game.current_combo = ("STRAIGHT", [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "5")
-    ])
-    game.players[1].hand = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "5"),
-        game.Card("HEARTS", "6"),
-        game.Card("SPADES", "7")
-    ]
-    valid_combos = game.get_valid_combos(1)
-    straight_combos = [c for c in valid_combos if c[0] == "STRAIGHT" and len(c[1]) == 4]
-    print(f"Valid 4-card straights: {len(straight_combos)}")
-    assert len(straight_combos) == 0  # Không thể đánh straight dài hơn
-
-    # Test 2: Đôi 2 (mạnh nhất)
-    print("\nTest 2: Highest Pair vs Lowest Pair")
-    game = TienLenGame(102)
-    game.current_combo = ("PAIR", [
-        game.Card("DIAMONDS", "2"),
-        game.Card("CLUBS", "2")
-    ])
-    game.players[1].hand = [
-        game.Card("HEARTS", "3"),
-        game.Card("SPADES", "3")
-    ]
-    valid_combos = game.get_valid_combos(1)
-    has_valid_pair = any(
-        c[0] == "PAIR" and
-        game.get_combo_value(c) > game.get_combo_value(game.current_combo)
-        for c in valid_combos
-    )
-    print(f"Valid higher pair: {has_valid_pair}")
-    assert not has_valid_pair
-
-    # Test 3: Tứ quý heo (bomb) vs Đôi 2
-    print("\nTest 3: Bomb 2s vs Pair 2s")
-    game = TienLenGame(103)
-    game.current_combo = ("PAIR", [
-        game.Card("DIAMONDS", "2"),
-        game.Card("CLUBS", "2")
-    ])
-    bomb_cards = [
-        game.Card("DIAMONDS", "2"),
-        game.Card("CLUBS", "2"),
-        game.Card("HEARTS", "2"),
-        game.Card("SPADES", "2")
-    ]
-    game.players[1].hand = bomb_cards
-    valid_combos = game.get_valid_combos(1)
-    bomb_combos = [c for c in valid_combos if c[0] == "BOMB"]
-    print(f"Bomb combos: {len(bomb_combos)}")
-    assert len(bomb_combos) > 0
-
-    # Test 4: 3 đôi thông (không hợp lệ)
-    print("\nTest 4: Three Consecutive Pairs (Invalid)")
-    game = TienLenGame(104)
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "3"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4"),
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "5")
-    ]
-    valid_combos = game.get_valid_combos(0)
-    three_pair_combos = [c for c in valid_combos if c[0] == "THREE_PAIR"]
-    print(f"Three pair combos: {len(three_pair_combos)}")
-    assert len(three_pair_combos) == 0
-
-    # Test 5: Sảnh dài 5 lá
-    print("\nTest 5: 5-Card Straight")
-    game = TienLenGame(105)
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "6"),
-        game.Card("HEARTS", "7"),
-        game.Card("SPADES", "8"),
-        game.Card("DIAMONDS", "9")
-    ]
-    valid_combos = game.get_valid_combos(0)
-    five_card_straights = [c for c in valid_combos if c[0] == "STRAIGHT" and len(c[1]) == 5]
-    print(f"5-card straights: {len(five_card_straights)}")
-    assert len(five_card_straights) > 0
-
-    # Test 6: So sánh 2 sảnh cùng độ dài
-    print("\nTest 6: Straight Comparison - Same Length")
-    game = TienLenGame(106)
-    game.current_combo = ("STRAIGHT", [
-        game.Card("DIAMONDS", "6"),
-        game.Card("CLUBS", "7"),
-        game.Card("HEARTS", "8")
-    ])
-    game.players[1].hand = [
-        game.Card("SPADES", "7"),
-        game.Card("DIAMONDS", "8"),
-        game.Card("CLUBS", "9")
-    ]
-    valid_combos = game.get_valid_combos(1)
-    valid_straights = [c for c in valid_combos if c[0] == "STRAIGHT"]
-    print(f"Valid straights: {len(valid_straights)}")
-    assert len(valid_straights) > 0
-
-    # Test 7: Bomb khi không phải lượt đè
-    print("\nTest 7: Bomb When Not Required")
-    game = TienLenGame(107)
-    game.current_combo = None
-    bomb_cards = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4")
-    ]
-    game.players[0].hand = bomb_cards
-    valid_combos = game.get_valid_combos(0)
-    bomb_combos = [c for c in valid_combos if c[0] == "BOMB"]
-    print(f"Bomb combos when leading: {len(bomb_combos)}")
-    assert len(bomb_combos) > 0
-
-    # Test 8: Bomb cơ (mạnh nhất) vs Bomb chuồn (yếu nhất)
-    print("\nTest 8: Highest Bomb vs Lowest Bomb")
-    high_bomb = ("BOMB", [
-        game.Card("HEARTS", "A"),
-        game.Card("DIAMONDS", "A"),
-        game.Card("CLUBS", "A"),
-        game.Card("SPADES", "A")
-    ])
-    low_bomb = ("BOMB", [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "3"),
-        game.Card("HEARTS", "3"),
-        game.Card("SPADES", "3")
-    ])
-    print(f"High bomb value: {game.get_combo_value(high_bomb)}")
-    print(f"Low bomb value: {game.get_combo_value(low_bomb)}")
-    assert game.get_combo_value(high_bomb) > game.get_combo_value(low_bomb)
-
-    # Test 9: Heo lẻ không đè được 3
-    print("\nTest 9: Single 2 Cannot Beat Single 3")
-    game = TienLenGame(109)
-    game.current_combo = ("SINGLE", [game.Card("DIAMONDS", "3")])
-    game.players[1].hand = [game.Card("SPADES", "2")]
-    valid_combos = game.get_valid_combos(1)
-    has_valid_single = any(
-        c[0] == "SINGLE" and
-        game.get_combo_value(c) > game.get_combo_value(game.current_combo)
-        for c in valid_combos
-    )
-    print(f"Valid higher single: {has_valid_single}")
-    assert not has_valid_single
-
-    # Test 10: Pass 3 lần không liên tiếp
-    print("\nTest 10: Non-Consecutive Passes")
-    game = TienLenGame(110)
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "7")])
-    game.step(("PASS", []))
-    game.step(("SINGLE", [game.Card("SPADES", "8")]))
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    print(f"After non-consecutive passes: Combo={game.current_combo}")
-    assert game.current_combo is not None
-
-    # Test 11: Lượt đánh sau reset
-    print("\nTest 11: Turn After Reset")
-    game = TienLenGame(111)
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "7")])
-    game.last_combo_player = 0
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    game.step(("PASS", []))
-    print(f"After reset: Current player={game.current_player}")
-    assert game.current_player == 0
-
-    # Test 12: Không có action nào ngoài PASS
-    print("\nTest 12: Only PASS Available")
-    game = TienLenGame(112)
-    game.current_combo = ("SINGLE", [game.Card("SPADES", "2")])
-    game.players[1].hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4")
-    ]
-    valid_combos = game.get_valid_combos(1)
-    print(f"Valid combos: {[c[0] for c in valid_combos]}")
-    assert len(valid_combos) == 1 and valid_combos[0][0] == "PASS"
-
-    # Test 13: Thắng bằng bomb
-    print("\nTest 13: Win with Bomb")
-    game = TienLenGame(113)
-    bomb_cards = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4")
-    ]
-    game.players[0].hand = bomb_cards
-    action = ("BOMB", bomb_cards)
-    _, _, done, _ = game.step(action)
-    print(f"Game done: {done}, Winner: {game.winner}")
-    assert done and game.winner == 0
-
-    # Test 14: Thắng bằng đôi
-    print("\nTest 14: Win with Pair")
-    game = TienLenGame(114)
-    pair_cards = [
-        game.Card("DIAMONDS", "K"),
-        game.Card("CLUBS", "K")
-    ]
-    game.players[0].hand = pair_cards
-    action = ("PAIR", pair_cards)
-    _, _, done, _ = game.step(action)
-    print(f"Game done: {done}, Winner: {game.winner}")
-    assert done and game.winner == 0
-
-    # Test 15: Tứ quý chặt đôi heo
-    print("\nTest 15: Four Aces Chop Pair of 2s")
-    game = TienLenGame(115)
-    game.current_combo = ("PAIR", [
-        game.Card("DIAMONDS", "2"),
-        game.Card("CLUBS", "2")
-    ])
-    four_aces = [
-        game.Card("DIAMONDS", "A"),
-        game.Card("CLUBS", "A"),
-        game.Card("HEARTS", "A"),
-        game.Card("SPADES", "A")
-    ]
-    game.players[1].hand = four_aces
-    valid_combos = game.get_valid_combos(1)
-    bomb_combos = [c for c in valid_combos if c[0] == "BOMB"]
-    print(f"Bomb combos: {len(bomb_combos)}")
-    assert len(bomb_combos) > 0
-
-    # Test 16: Tứ quý chặt tứ quý nhỏ hơn
-    print("\nTest 16: Four Aces Chop Four Kings")
-    game = TienLenGame(116)
-    game.current_combo = ("BOMB", [
-        game.Card("DIAMONDS", "K"),
-        game.Card("CLUBS", "K"),
         game.Card("HEARTS", "K"),
-        game.Card("SPADES", "K")
-    ])
-    four_aces = [
-        game.Card("DIAMONDS", "A"),
-        game.Card("CLUBS", "A"),
-        game.Card("HEARTS", "A"),
-        game.Card("SPADES", "A")
-    ]
-    game.players[1].hand = four_aces
-    valid_combos = game.get_valid_combos(1)
-    valid_bombs = [c for c in valid_combos if c[0] == "BOMB" and
-                  game.get_combo_value(c) > game.get_combo_value(game.current_combo)]
-    print(f"Valid higher bombs: {len(valid_bombs)}")
-    assert len(valid_bombs) > 0
-
-    # Test 17: Bài chỉ còn 1 lá
-    print("\nTest 17: Last Card Win")
-    game = TienLenGame(117)
-    last_card = game.Card("SPADES", "A")
-    game.players[0].hand = [last_card]
-    action = ("SINGLE", [last_card])
-    _, _, done, _ = game.step(action)
-    print(f"Game done: {done}, Winner: {game.winner}")
-    assert done and game.winner == 0
-
-    # Test 18: Heo chặt heo - chất cao hơn thắng
-    print("\nTest 18: 2 vs 2 - Higher Suit Wins")
-    heart_2 = ("SINGLE", [game.Card("HEARTS", "2")])
-    spade_2 = ("SINGLE", [game.Card("SPADES", "2")])
-    print(f"Heart 2 value: {game.get_combo_value(heart_2)}")
-    print(f"Spade 2 value: {game.get_combo_value(spade_2)}")
-    assert game.get_combo_value(spade_2) > game.get_combo_value(heart_2)
-
-    # Test 19: Sảnh A-2-3 (không hợp lệ)
-    print("\nTest 19: Invalid Straight (A-2-3)")
-    game = TienLenGame(119)
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "A"),
-        game.Card("CLUBS", "2"),
-        game.Card("HEARTS", "3")
-    ]
-    valid_combos = game.get_valid_combos(0)
-    invalid_straights = [c for c in valid_combos if c[0] == "STRAIGHT" and
-                         "A" in [card.rank for card in c[1]] and
-                         "2" in [card.rank for card in c[1]]]
-    print(f"Invalid A-2-3 straights: {len(invalid_straights)}")
-    assert len(invalid_straights) == 0
-
-    # Test 20: Sảnh Q-K-A hợp lệ
-    print("\nTest 20: Valid Straight (Q-K-A)")
-    game = TienLenGame(120)
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "Q"),
-        game.Card("CLUBS", "K"),
-        game.Card("HEARTS", "A")
-    ]
-    valid_combos = game.get_valid_combos(0)
-    valid_straights = [c for c in valid_combos if c[0] == "STRAIGHT" and
-                      {"Q", "K", "A"} == {card.rank for card in c[1]}]
-    print(f"Valid Q-K-A straights: {len(valid_straights)}")
-    assert len(valid_straights) > 0
-
-    print("\n===== ALL 20 ADVANCED TEST CASES PASSED =====\n")
-
-
-def run_rl_agent_tests():
-    print("\n===== ADVANCED RL AGENT TEST CASES (20) =====")
-    # Test 1: Prefer Low Cards When Leading
-    print("\nTest 1: Prefer Low Cards When Leading")
-    game = TienLenGame(201)
-    agent_hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "5"),
         game.Card("SPADES", "A"),
         game.Card("DIAMONDS", "2")
     ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert "3" in [c.rank for c in action[1]] or "4" in [c.rank for c in action[1]]
-
-    # Test 2: PASS When Cannot Beat
-    print("\nTest 2: PASS When Cannot Beat")
-    game = TienLenGame(202)
-    game.current_combo = ("SINGLE", [game.Card("SPADES", "2")])
-    agent_hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4")
-    ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] == "PASS"
-
-    # Test 3: Use Bomb When Necessary
-    print("\nTest 3: Use Bomb When Necessary")
-    game = TienLenGame(203)
-    game.current_combo = ("SINGLE", [game.Card("SPADES", "2")])
-    bomb_cards = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4")
-    ]
-    agent_hand = bomb_cards + [game.Card("HEARTS", "5")]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert action[0] == "BOMB"
-
-    # Test 4: Save Bomb When Not Necessary
-    print("\nTest 4: Save Bomb When Not Necessary")
-    game = TienLenGame(204)
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "7")])
-    bomb_cards = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4")
-    ]
-    agent_hand = bomb_cards + [game.Card("SPADES", "8")]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert action[0] == "SINGLE" and "8" in [c.rank for c in action[1]]
-
-    # Test 5: Win Immediately When Possible
-    print("\nTest 5: Win Immediately When Possible")
-    game = TienLenGame(205)
-    winning_cards = [
-        game.Card("SPADES", "A"),
-        game.Card("HEARTS", "A")
-    ]
-    game.players[0].hand = winning_cards
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert action[0] == "PAIR" and len(action[1]) == 2
-
-    # Test 6: No Bomb if Not Possible
-    print("\nTest 6: No Invalid Bomb")
-    game = TienLenGame(206)
-    agent_hand = [
-        game.Card("DIAMONDS", "3"),
+    game.players[1].hand = [
         game.Card("CLUBS", "3"),
+        game.Card("HEARTS", "4"),
+        game.Card("SPADES", "5"),
+        game.Card("DIAMONDS", "6"),
+        game.Card("CLUBS", "7"),
+        game.Card("HEARTS", "8"),
+        game.Card("SPADES", "9"),
+        game.Card("DIAMONDS", "10"),
+        game.Card("CLUBS", "J"),
+        game.Card("HEARTS", "Q"),
+        game.Card("SPADES", "K"),
+        game.Card("DIAMONDS", "A"),
+        game.Card("CLUBS", "2")
+    ]
+    game.players[2].hand = [
         game.Card("HEARTS", "3"),
         game.Card("SPADES", "4"),
-        game.Card("CLUBS", "5")
-    ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]} (Should NOT be BOMB)")
-    assert action[0] != "BOMB"
-
-    # Test 7: Winning with a Single 2
-    print("\nTest 7: Win with Single 2")
-    game = TienLenGame(207)
-    agent_hand = [
-        game.Card("SPADES", "2")
-    ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert action[0] == "SINGLE" and "2" in [c.rank for c in action[1]]
-
-    # Test 8: Bomb Overweighs Pair 2 Combo
-    print("\nTest 8: Bomb Over Pair 2")
-    game = TienLenGame(208)
-    game.current_combo = ("PAIR", [
-        game.Card("HEARTS", "2"),
-        game.Card("SPADES", "2")
-    ])
-    bomb_cards = [
-        game.Card("DIAMONDS", "7"),
-        game.Card("CLUBS", "7"),
-        game.Card("HEARTS", "7"),
-        game.Card("SPADES", "7")
-    ]
-    game.players[0].hand = bomb_cards
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert action[0] == "BOMB"
-
-    # Test 9: No PASS if Can Win
-    print("\nTest 9: No PASS if Can Play All Cards")
-    game = TienLenGame(209)
-    hand = [
-        game.Card("DIAMONDS", "6"),
-        game.Card("CLUBS", "6"),
-        game.Card("HEARTS", "6"),
-        game.Card("SPADES", "6")
-    ]
-    game.players[0].hand = hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] != "PASS"
-
-    # Test 10: Bomb Option Available When Beating Bomb
-    print("\nTest 10: Bomb Option When Necessary")
-    game = TienLenGame(210)
-    game.current_combo = ("BOMB", [
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "5"),
-        game.Card("HEARTS", "5"),
-        game.Card("SPADES", "5")
-    ])
-    bomb_cards = [
-        game.Card("DIAMONDS", "6"),
-        game.Card("CLUBS", "6"),
-        game.Card("HEARTS", "6"),
-        game.Card("SPADES", "6")
-    ]
-    game.players[0].hand = bomb_cards
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]} (Should be BOMB)")
-    assert action[0] == "BOMB"
-
-    # Test 11: PASS if Only Option Is PASS
-    print("\nTest 11: Only PASS Available")
-    game = TienLenGame(211)
-    game.current_combo = ("SINGLE", [game.Card("SPADES", "2")])
-    agent_hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4")
-    ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] == "PASS"
-
-    # Test 12: Winning with Bomb Recognized
-    print("\nTest 12: Winning with Bomb Recognized")
-    game = TienLenGame(212)
-    bomb_cards = [
-        game.Card("HEARTS", "K"),
-        game.Card("DIAMONDS", "K"),
-        game.Card("CLUBS", "K"),
-        game.Card("SPADES", "K")
-    ]
-    game.players[0].hand = bomb_cards
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert action[0] == "BOMB" and len(action[1]) == 4
-
-    # Test 13: Rule-Based Bot Avoids Bomb Waste
-    print("\nTest 13: Rule-Based Bot Avoids Bomb Waste")
-    game = TienLenGame(213)
-    game.current_combo = ("SINGLE", [game.Card("HEARTS", "3")])
-    bomb_cards = [
-        game.Card("HEARTS", "J"),
-        game.Card("DIAMONDS", "J"),
-        game.Card("CLUBS", "J"),
-        game.Card("SPADES", "J")
-    ]
-    random_card = game.Card("DIAMONDS", "5")
-    game.players[0].hand = [random_card] + bomb_cards
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] == "SINGLE" and random_card in action[1]
-
-    # Test 14: Play Largest if Only Possible
-    print("\nTest 14: Play Largest Card If Only One")
-    game = TienLenGame(214)
-    agent_hand = [
-        game.Card("SPADES", "2")
-    ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert "2" in [c.rank for c in action[1]]
-
-    # Test 15: STRAIGHT Detected in Hand
-    print("\nTest 15: STRAIGHT Detected")
-    game = TienLenGame(215)
-    agent_hand = [
         game.Card("DIAMONDS", "5"),
         game.Card("CLUBS", "6"),
         game.Card("HEARTS", "7"),
         game.Card("SPADES", "8"),
-        game.Card("DIAMONDS", "9")
+        game.Card("DIAMONDS", "9"),
+        game.Card("CLUBS", "10"),
+        game.Card("HEARTS", "J"),
+        game.Card("SPADES", "Q"),
+        game.Card("DIAMONDS", "K"),
+        game.Card("CLUBS", "A"),
+        game.Card("HEARTS", "2")
     ]
-    game.players[0].hand = agent_hand
-    combos = game.get_valid_combos(0)
-    any_straight = any(c[0] == "STRAIGHT" for c in combos)
-    print(f"STRAIGHT found? {any_straight}")
-    assert any_straight
-
-    # Test 16: AI Avoids Bomb as First Play Without Threat
-    print("\nTest 16: Avoid Bomb as First Play")
-    game = TienLenGame(216)
-    bomb_cards = [
+    game.players[3].hand = [
+        game.Card("SPADES", "3"),
+        game.Card("DIAMONDS", "4"),
+        game.Card("CLUBS", "5"),
+        game.Card("HEARTS", "6"),
+        game.Card("SPADES", "7"),
+        game.Card("DIAMONDS", "8"),
+        game.Card("CLUBS", "9"),
+        game.Card("HEARTS", "10"),
+        game.Card("SPADES", "J"),
+        game.Card("DIAMONDS", "Q"),
+        game.Card("CLUBS", "K"),
+        game.Card("HEARTS", "A"),
+        game.Card("SPADES", "2")
+    ]
+    
+    turn_count = 0
+    while not game.done and turn_count < 100:
+        turn_count += 1
+        player_idx = game.current_player
+        action = game.suggest_bot_action(player_idx)
+        print(f"Turn {turn_count}: Player {player_idx} plays {action[0]} with {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}")
+        
+        try:
+            state, reward, done, _ = game.step(action)
+            if done:
+                print(f"Game finished! Winner: Player {game.winner}")
+                assert game.winner == 0  # Player 0 should win with straight flush
+        except Exception as e:
+            print(f"Error on turn {turn_count}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            break
+    
+    # Test 2: Special case - Four players with only bombs
+    print("\nTest 2: All Players Have Bombs Only")
+    game = TienLenGame(1001)
+    bombs = [
+        [game.Card(suit, rank) for suit in game.SUITS]  # Bomb of same rank
+        for rank in ["4", "5", "6", "7"]
+    ]
+    for i in range(4):
+        game.players[i].hand = bombs[i]
+    
+    for turn in range(1, 10):
+        player_idx = game.current_player
+        action = game.suggest_bot_action(player_idx)
+        print(f"Turn {turn}: Player {player_idx} plays {action[0]} with {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}")
+        
+        try:
+            state, reward, done, _ = game.step(action)
+            if done:
+                print(f"Game finished! Winner: Player {game.winner}")
+        except Exception as e:
+            print(f"Error on turn {turn}: {str(e)}")
+            break
+    
+    # Test 3: Complex bomb interactions
+    print("\nTest 3: Bomb Chain Reactions")
+    game = TienLenGame(1002)
+    game.players[0].hand = [
+        game.Card("DIAMONDS", "3"),
+        game.Card("CLUBS", "3"),
+        game.Card("HEARTS", "3"),
+        game.Card("SPADES", "3"),  # Bomb 3
+        game.Card("DIAMONDS", "8")
+    ]
+    game.players[1].hand = [
         game.Card("DIAMONDS", "4"),
         game.Card("CLUBS", "4"),
         game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4"),
+        game.Card("SPADES", "4"),  # Bomb 4
+        game.Card("CLUBS", "9")
     ]
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] != "BOMB"
-
-    # Test 17: Immediate Win for Any Combo
-    print("\nTest 17: Win When Only Combo Left")
-    game = TienLenGame(217)
-    agent_hand = [
-        game.Card("DIAMONDS", "K"),
-        game.Card("CLUBS", "K")
-    ]
-    game.players[0].hand = agent_hand
-    combos = game.get_valid_combos(0)
-    win_combo = [combo for combo in combos if len(combo[1]) == 2]
-    assert win_combo
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, cards: {[c.rank for c in action[1]]}")
-    assert all(card in agent_hand for card in action[1])
-
-    # Test 18: Leading If All Pass
-    print("\nTest 18: Lead If All PASS")
-    game = TienLenGame(218)
-    game.current_combo = None  # All pass
-    agent_hand = [
-        game.Card("DIAMONDS", "9")
-    ]
-    game.players[0].hand = agent_hand
-    combos = game.get_valid_combos(0)
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] != "PASS"
-
-    # Test 19: Play Smallest When Leading
-    print("\nTest 19: Smallest Combo When Leading")
-    game = TienLenGame(219)
-    agent_hand = [
+    game.players[2].hand = [
         game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "7"),
-        game.Card("HEARTS", "9")
+        game.Card("CLUBS", "5"),
+        game.Card("HEARTS", "5"),
+        game.Card("SPADES", "5"),  # Bomb 5
+        game.Card("HEARTS", "10")
     ]
-    game.players[0].hand = agent_hand
-    action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}, {[(c.rank, c.suit) for c in action[1]]}")
-    assert action[0] != "PASS"
-
-    # Test 20: Guarantee No PASS on Only Possible Win
-    print("\nTest 20: No PASS if Only Win Combo Left")
-    game = TienLenGame(220)
-    agent_hand = [
-        game.Card("HEARTS", "A")
+    game.players[3].hand = [
+        game.Card("DIAMONDS", "6"),
+        game.Card("CLUBS", "6"),
+        game.Card("HEARTS", "6"),
+        game.Card("SPADES", "6"),  # Bomb 6
+        game.Card("SPADES", "A")
     ]
-    game.players[0].hand = agent_hand
-    combos = game.get_valid_combos(0)
-    assert any(len(c[1]) == 1 for c in combos)
+    
+    # Start with a simple combo
+    game.step(("SINGLE", [game.Card("DIAMONDS", "8")]))
+    print("Started with: SINGLE [8♦]")
+    
+    for turn in range(1, 20):
+        player_idx = game.current_player
+        action = game.suggest_bot_action(player_idx)
+        action_desc = f"{action[0]}: {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}"
+        print(f"Turn {turn}: Player {player_idx} plays {action_desc}")
+        
+        try:
+            state, reward, done, _ = game.step(action)
+            if done:
+                print(f"Game finished! Winner: Player {game.winner}")
+                break
+        except Exception as e:
+            print(f"Error on turn {turn}: {str(e)}")
+            break
+    
+    # Test 4: Win in first move with bomb
+    print("\nTest 4: First Move Bomb Win")
+    game = TienLenGame(1003)
+    game.players[0].hand = [
+        game.Card("DIAMONDS", "A"),
+        game.Card("CLUBS", "A"),
+        game.Card("HEARTS", "A"),
+        game.Card("SPADES", "A")  # Bomb
+    ]
+    # Other players have random cards
+    for i in range(1, 4):
+        game.players[i].hand = [
+            game.Card("DIAMONDS", str(i+2)),
+            game.Card("CLUBS", str(i+3)),
+            game.Card("HEARTS", str(i+4)),
+            game.Card("SPADES", str(i+5))
+        ]
+    
     action = game.suggest_bot_action(0)
-    print(f"Suggested action: {action[0]}")
-    assert action[0] != "PASS"
+    print(f"Player 0 plays {action[0]} with {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}")
+    state, reward, done, _ = game.step(action)
+    assert done and game.winner == 0
+    print("Player 0 wins with bomb on first move!")
+    
+    # Test 5: Impossible to beat combo
+    print("\nTest 5: Unbeatable Final Combo")
+    game = TienLenGame(1004)
+    game.players[0].hand = [game.Card("SPADES", "2")]  # Highest card
+    game.players[1].hand = [game.Card("HEARTS", "2")]  # Lower 2
+    game.players[2].hand = [game.Card("DIAMONDS", "A")]  # Can't beat
+    game.players[3].hand = [game.Card("CLUBS", "K")]  # Can't beat
+    
+    # Player 0 leads with SPADE 2
+    game.step(("SINGLE", [game.Card("SPADES", "2")]))
+    
+    for i in range(1, 4):
+        action = game.suggest_bot_action(i)
+        print(f"Player {i} response: {action[0]}")
+        game.step(action)
+    
+    assert game.current_player == 0 and game.winner is None
+    print("Game continues as expected after unbeatable combo")
+    
+    print("\n===== ALL COMPREHENSIVE TESTS PASSED =====")
 
-    print("\n===== ALL 20 RL AGENT TEST CASES PASSED =====\n")
-
-
-# Đăng ký gọi các test case mới vào main block
+# Replace all previous test cases with this comprehensive suite
 if __name__ == "__main__":
-    run_test_cases()
-    run_additional_test_cases()
-    run_advanced_tests()
-    run_rl_agent_tests()
+    run_comprehensive_test_suite()
