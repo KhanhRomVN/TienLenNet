@@ -1,3 +1,5 @@
+notebooks/tienlen_net_v1.py
+
 # Cell 1: Installations
 !pip install torch numpy tqdm lz4 pyarrow
 !mkdir -p logs saved_models
@@ -180,11 +182,15 @@ class TienLenGame:
                             straights.append(("STRAIGHT", straight))
                 return straights
 
+            # --- Insert improved combo logic here ---
             valid_combos += get_singles()
             valid_combos += get_pairs()
             valid_combos += get_triples()
             valid_combos += get_straights()
             valid_combos += get_bombs()
+
+            # Add 3 consecutive pairs (ba đôi thông) if any
+            valid_combos += self.get_consecutive_pairs(player)
 
             # STRICT FILTERING if there's a current combo to compare against
             if self.current_combo and self.current_combo[0] != "PASS":
@@ -238,6 +244,26 @@ class TienLenGame:
             traceback.print_exc()
             return [("PASS", [])]
 
+    def get_consecutive_pairs(self, player):
+        # "3 đôi thông" = 3 consecutive pairs (6 cards, ranks must be consecutive, and each pair same rank)
+        ranks = [self.RANK_VALUES[card.rank] for card in player.hand]
+        available_pairs = {}
+        for rank in TienLenGame.RANKS:
+            cards_of_rank = [card for card in player.hand if card.rank == rank]
+            if len(cards_of_rank) >= 2:
+                available_pairs[self.RANK_VALUES[rank]] = cards_of_rank
+        combos = []
+        sorted_ranks = sorted(available_pairs.keys())
+        for i in range(len(sorted_ranks) - 2):
+            r0, r1, r2 = sorted_ranks[i:i+3]
+            if r1 == r0 + 1 and r2 == r1 + 1:
+                cards = []
+                for r in [r0, r1, r2]:
+                    # Add lowest 2 cards for each rank
+                    cards += sorted(available_pairs[r], key=lambda c: self.SUIT_ORDER[c.suit])[:2]
+                combos.append(("CONSEC_PAIRS", cards))
+        return combos
+
     def get_combo_value(self, combo):
         combo_type, cards = combo
 
@@ -271,42 +297,342 @@ class TienLenGame:
 
     def suggest_bot_action(self, player_idx):
         valid_actions = self.get_valid_combos(player_idx)
-
-        # If no valid actions, return PASS
-        if not valid_actions:
-            return ("PASS", [])
-
         player = self.players[player_idx]
-        # Immediate win: play all cards if can
+        hand = player.hand
+
+        # Immediate win condition
         for action in valid_actions:
-            if action[0] != "PASS" and len(action[1]) == len(player.hand):
+            if action[0] != "PASS" and len(action[1]) == len(hand):
                 return action
 
-        # If leading, play smallest possible combo
-        if self.current_combo is None or self.current_combo[0] == "PASS":
-            sorted_actions = sorted(
-                [a for a in valid_actions if a[0] != "PASS"],
-                key=lambda a: self.get_combo_value(a)
-            )
-            return sorted_actions[0] if sorted_actions else valid_actions[0]
+        # Card counting and probability tracking
+        played_cards = self.get_played_cards()
+        remaining_cards = self.get_remaining_cards(played_cards)
+        opponent_profile = self.estimate_opponent_hands(remaining_cards)
 
-        # If not leading, try to beat current combo same type
+        # Hand analysis metrics
+        hand_strength = self.calculate_hand_strength(hand, opponent_profile)
+        high_card_count = sum(1 for card in hand if card.rank in ['A', '2'] or card.rank in ['K', 'Q'])
+        low_card_count = sum(1 for card in hand if card.rank in ['3', '4', '5'])
+        chain_potential = self.identify_chain_potential(hand)
+        bomb_potential = self.identify_bomb_potential(hand)
+
+        # Game phase detection
+        total_cards_played = 52 - sum(len(p.hand) for p in self.players)
+        game_phase = "early" if total_cards_played < 15 else "mid" if total_cards_played < 35 else "late"
+
+        # === Improved action logic for bot (early combos, pairs/triples, bombs, better low card use) ===
+
+        # In early game, prefer playing out PAIR/TRIPLE of low card (rank < 5) to "thoát bài" and avoid exposure of combos too soon
+        if self.current_combo is None or self.current_combo[0] == "PASS":
+            if game_phase == "early":
+                # Find low pairs/triples anywhere
+                low_pairs = [a for a in valid_actions
+                            if a[0] in ["PAIR", "TRIPLE"]
+                            and max(self.RANK_VALUES[c.rank] for c in a[1]) < 5]
+                if low_pairs:
+                    return random.choice(low_pairs)
+                # Prefer lowest singles first if available
+                low_singles = [a for a in valid_actions
+                               if a[0] == "SINGLE" and self.RANK_VALUES[a[1][0].rank] < 5]
+                if low_singles:
+                    return min(low_singles, key=lambda a: self.get_combo_value(a))
+
+                # Fall back to smaller chains/straights of length 3-4 only instead of exposing long straights
+                short_chains = [a for a in valid_actions if a[0] == "STRAIGHT" and 3 <= len(a[1]) <= 4]
+                if short_chains:
+                    return min(short_chains, key=lambda a: self.get_combo_value(a))
+
+            # Prefer not to play very long straights unless nothing else
+            long_chains = [a for a in valid_actions if a[0] == "STRAIGHT" and len(a[1]) > 4]
+            if long_chains:
+                other_non_pass = [a for a in valid_actions if a[0] != "PASS" and a[0] != "STRAIGHT"]
+                if other_non_pass:
+                    return min(other_non_pass, key=lambda a: self.get_combo_value(a))
+
+            # Try using "3 đôi thông" (if implemented and valid in get_valid_combos)
+            consecutive_pairs = [a for a in valid_actions if a[0] == "CONSEC_PAIRS"]
+            if consecutive_pairs:
+                return consecutive_pairs[0]
+
+            # Default fallback
+            if game_phase == "early" or game_phase == "mid":
+                low_actions = [a for a in valid_actions
+                               if max(self.RANK_VALUES[c.rank] for c in a[1]) < 5]
+                if low_actions:
+                    return random.choice(low_actions)
+
+            # Use original fallback strategy
+            if game_phase == "early":
+                return self.early_game_lead(hand, valid_actions, hand_strength, chain_potential)
+            elif game_phase == "mid":
+                return self.mid_game_lead(hand, valid_actions, opponent_profile, bomb_potential)
+            else:
+                return self.late_game_lead(hand, valid_actions, opponent_profile)
+
+        # Non-leading/responding to a current combo:
+        # Randomly allow bomb use (about 30%) if available and current combo is not a BOMB
+        if self.current_combo and self.current_combo[0] != "BOMB":
+            bombs = [a for a in valid_actions if a[0] == "BOMB"]
+            if bombs and random.random() < 0.3:
+                return min(bombs, key=lambda a: self.get_combo_value(a))
+
+        # Otherwise use original strategic response
+        return self.response_strategy(player_idx, valid_actions, game_phase, hand_strength)
+
+    def get_played_cards(self):
+        played = []
+        for _, action in self.history:
+            if action[0] != "PASS":
+                played.extend(action[1])
+        return played
+
+    def get_remaining_cards(self, played_cards):
+        all_cards = [self.Card(suit, rank) for suit in self.SUITS for rank in self.RANKS]
+        # This will be O(n^2) but that's ok for small N, else Card needs __eq__
+        remaining = []
+        for card in all_cards:
+            found = False
+            for played in played_cards:
+                if card.suit == played.suit and card.rank == played.rank:
+                    found = True
+                    break
+            if not found:
+                remaining.append(card)
+        return remaining
+
+    def estimate_opponent_hands(self, remaining_cards):
+        opponent_hands = {i: [] for i in range(4) if i != self.current_player}
+        card_counts = {}
+        for card in remaining_cards:
+            card_counts[(card.suit, card.rank)] = card_counts.get((card.suit, card.rank), 0) + 1
+        # Adjust based on observed plays (will be reflected in played/remaining)
+        for card in remaining_cards:
+            possible_owners = [i for i in range(4) if i != self.current_player]
+            for owner in possible_owners:
+                if random.random() < (1.0 / len(possible_owners)):
+                    opponent_hands[owner].append(card)
+                    break
+        return opponent_hands
+
+    def calculate_hand_strength(self, hand, opponent_profile):
+        card_values = sum(self.RANK_VALUES[card.rank] for card in hand)
+        combo_potential = self.identify_combo_potential(hand)
+        flexibility = self.calculate_hand_flexibility(hand)
+        opponent_pressure = 0
+        for cards in opponent_profile.values():
+            opponent_pressure += sum(1 for card in cards if card.rank in ['A', '2'])
+        strength = (card_values * 0.3 + combo_potential * 0.4 + flexibility * 0.2 -
+                    opponent_pressure * 0.1)
+        return strength
+
+    def identify_combo_potential(self, hand):
+        score = 0
+        rank_counts = {}
+        for card in hand:
+            rank_counts[card.rank] = rank_counts.get(card.rank, 0) + 1
+        for count in rank_counts.values():
+            if count >= 2: score += 2
+            if count >= 3: score += 3
+            if count >= 4: score += 5
+        sorted_ranks = sorted(set(self.RANK_VALUES[card.rank] for card in hand))
+        chain_length = 0
+        max_chain = 0
+        for i in range(1, len(sorted_ranks)):
+            if sorted_ranks[i] == sorted_ranks[i-1] + 1:
+                chain_length += 1
+                max_chain = max(max_chain, chain_length)
+            else:
+                chain_length = 0
+        if max_chain >= 2:
+            score += max_chain * 3
+        return score
+
+    def calculate_hand_flexibility(self, hand):
+        flexibility = 0
+        ranks = [card.rank for card in hand]
+        flexibility += len(hand)
+        flexibility += sum(1 for rank in set(ranks) if ranks.count(rank) >= 2) * 2
+        flexibility += sum(1 for rank in set(ranks) if ranks.count(rank) >= 3) * 3
+        for length in range(3, 6):
+            if self.can_make_chain(hand, length):
+                flexibility += length * 2
+        return flexibility
+
+    def early_game_lead(self, hand, valid_actions, hand_strength, chain_potential):
+        if hand_strength > 50:
+            return self.aggressive_lead(hand, valid_actions)
+        else:
+            return self.conservative_lead(hand, valid_actions, chain_potential)
+
+    def mid_game_lead(self, hand, valid_actions, opponent_profile, bomb_potential):
+        weak_opponents = sum(1 for cards in opponent_profile.values() if len(cards) > 8)
+        if weak_opponents >= 2:
+            return self.aggressive_lead(hand, valid_actions)
+        elif bomb_potential:
+            non_bomb_actions = [a for a in valid_actions if a[0] != "BOMB"]
+            if non_bomb_actions:
+                return min(non_bomb_actions, key=lambda a: self.get_combo_value(a))
+        return self.conservative_lead(hand, valid_actions, None)
+
+    def late_game_lead(self, hand, valid_actions, opponent_profile):
+        shortest_opponent = min(len(cards) for cards in opponent_profile.values())
+        if len(hand) <= shortest_opponent + 2:
+            return self.aggressive_lead(hand, valid_actions)
+        else:
+            return self.conservative_lead(hand, valid_actions, None)
+
+    def aggressive_lead(self, hand, valid_actions):
+        actions = [a for a in valid_actions if a[0] != "PASS"]
+        high_card_actions = []
+        for action in actions:
+            if any(card.rank in ['A', '2'] for card in action[1]):
+                high_card_actions.append(action)
+        if high_card_actions:
+            return max(high_card_actions, key=lambda a: self.get_combo_value(a))
+        elif actions:
+            return max(actions, key=lambda a: self.get_combo_value(a))
+        else:
+            return ("PASS", [])
+
+    def conservative_lead(self, hand, valid_actions, chain_potential):
+        actions = [a for a in valid_actions if a[0] != "PASS"]
+        if chain_potential:
+            chain_actions = [a for a in actions if a[0] == "STRAIGHT"]
+            if chain_actions:
+                longest_chain = max(len(a[1]) for a in chain_actions)
+                long_chains = [a for a in chain_actions if len(a[1]) == longest_chain]
+                return min(long_chains, key=lambda a: self.get_combo_value(a))
+        low_card_actions = []
+        for action in actions:
+            if all(card.rank in ['3', '4', '5', '6'] for card in action[1]):
+                low_card_actions.append(action)
+        if low_card_actions:
+            return min(low_card_actions, key=lambda a: self.get_combo_value(a))
+        elif actions:
+            return min(actions, key=lambda a: self.get_combo_value(a))
+        else:
+            return ("PASS", [])
+
+    def response_strategy(self, player_idx, valid_actions, game_phase, hand_strength):
+        current_value = self.get_combo_value(self.current_combo)
+        combo_type, current_cards = self.current_combo
+        player = self.players[player_idx]
         same_type_actions = [
             a for a in valid_actions
-            if a[0] == self.current_combo[0] and self.get_combo_value(a) > self.get_combo_value(self.current_combo)
+            if a[0] == combo_type and self.get_combo_value(a) > current_value
         ]
         if same_type_actions:
-            return min(same_type_actions, key=lambda a: self.get_combo_value(a))
-
-        # Bomb if available
+            if game_phase == "early":
+                return min(same_type_actions, key=lambda a: self.get_combo_value(a))
+            elif game_phase == "late" or hand_strength > 60:
+                return max(same_type_actions, key=lambda a: self.get_combo_value(a))
+            else:
+                return min(
+                    same_type_actions,
+                    key=lambda a: self.get_combo_value(a) - current_value
+                )
         bombs = [a for a in valid_actions if a[0] == "BOMB"]
         if bombs:
-            return min(bombs, key=lambda a: self.get_combo_value(a))
-
-        # Otherwise PASS
+            bomb_value = min(self.get_combo_value(bomb) for bomb in bombs)
+            should_bomb = False
+            bomb_benefit = self.calculate_bomb_benefit(player_idx)
+            if combo_type == "BOMB":
+                stronger_bombs = [b for b in bombs if self.get_combo_value(b) > current_value]
+                if stronger_bombs and bomb_benefit > 3:
+                    return min(stronger_bombs, key=lambda a: self.get_combo_value(a))
+            else:
+                if game_phase == "late" and bomb_benefit > 2:
+                    should_bomb = True
+                elif current_value > 200:
+                    should_bomb = True
+                elif bomb_benefit > 4:
+                    should_bomb = True
+                if should_bomb:
+                    return min(bombs, key=lambda a: self.get_combo_value(a))
+        if combo_type == "STRAIGHT" and len(current_cards) > 3:
+            for action in valid_actions:
+                if action[0] == "STRAIGHT" and len(action[1]) < len(current_cards):
+                    if self.is_chain_subset(action[1], current_cards):
+                        return action
+        if self.should_pass_strategically(player_idx, game_phase):
+            return ("PASS", [])
         return ("PASS", [])
 
+    def calculate_bomb_benefit(self, player_idx):
+        benefit = 0
+        current_value = self.get_combo_value(self.current_combo)
+        if current_value > 150:
+            benefit += 2
+        players_after = (self.current_player - player_idx) % 4
+        if players_after == 3:
+            benefit += 1
+        opponent_cards = sum(len(p.hand) for i, p in enumerate(self.players) if i != player_idx)
+        if len(self.players[player_idx].hand) < opponent_cards / 3:
+            benefit += 2
+        total_played = 52 - sum(len(p.hand) for p in self.players)
+        if total_played > 40:
+            benefit += 2
+        return benefit
+
+    def should_pass_strategically(self, player_idx, game_phase):
+        hand_size = len(self.players[player_idx].hand)
+        next_players = [(self.current_player + i) % 4 for i in range(1, 4)]
+        if player_idx in next_players:
+            last_player = next_players[-1]
+            if last_player == player_idx:
+                return False
+        if game_phase == "early":
+            high_cards = sum(1 for card in self.players[player_idx].hand
+                            if card.rank in ['A', '2'] or card.rank in ['K', 'Q'])
+            if hand_size > 0 and high_cards / hand_size > 0.4:
+                return True
+        bomb_potential = self.identify_bomb_potential(self.players[player_idx].hand)
+        if bomb_potential and self.current_combo[0] != "BOMB":
+            return True
+        return False
+
+    def identify_chain_potential(self, hand):
+        sorted_ranks = sorted(set(self.RANK_VALUES[card.rank] for card in hand))
+        chains = []
+        if not sorted_ranks:
+            return chains
+        current_chain = [sorted_ranks[0]]
+        for i in range(1, len(sorted_ranks)):
+            if sorted_ranks[i] == current_chain[-1] + 1:
+                current_chain.append(sorted_ranks[i])
+            else:
+                if len(current_chain) >= 3:
+                    chains.append(current_chain)
+                current_chain = [sorted_ranks[i]]
+        if len(current_chain) >= 3:
+            chains.append(current_chain)
+        return chains
+
+    def identify_bomb_potential(self, hand):
+        rank_counts = {}
+        for card in hand:
+            rank_counts[card.rank] = rank_counts.get(card.rank, 0) + 1
+        return any(count >= 4 for count in rank_counts.values())
+
+    def can_make_chain(self, hand, length):
+        ranks = sorted(set(self.RANK_VALUES[card.rank] for card in hand))
+        for i in range(len(ranks) - length + 1):
+            if ranks[i + length - 1] - ranks[i] == length - 1:
+                return True
+        return False
+
+    def is_chain_subset(self, subset, full_chain):
+        sub_ranks = sorted(self.RANK_VALUES[c.rank] for c in subset)
+        full_ranks = sorted(self.RANK_VALUES[c.rank] for c in full_chain)
+        for i in range(len(full_ranks) - len(sub_ranks) + 1):
+            if full_ranks[i:i+len(sub_ranks)] == sub_ranks:
+                return True
+        return False
+
     def step(self, action):
+        if self.done:
+            raise ValueError("Game is already over")
         action_type, cards = action
         player = self.players[self.current_player]
         reward = 0
@@ -908,7 +1234,7 @@ def log_gpu_utilization():
         except Exception:
             print("[GPU] Could not get utilization, nvidia-smi not available or failed.")
 
-def main_train_loop():
+def main_train_loop(total_episodes=500):
     print("Initializing training process...")
 
     # Create model
@@ -945,15 +1271,14 @@ def main_train_loop():
         scaler = DummyScaler()
 
     # Optimize episodes & buffer size for speed
-    num_episodes = 500
     games_per_episode = 10    # Lower for faster loop (from 30)
     training_steps = 50       # Lower for faster loop (from 100)
     min_buffer_size = 500     # ↓ lower requirement to enable early training
     batch_size = 512          # Increase batch size for better GPU utilization (from 256)
     best_win_rate = 0.0
 
-    for episode in range(start_epoch, num_episodes):
-        print(f"\n=== Episode {episode+1}/{num_episodes} | Buffer: {len(buffer)} | LR: {optimizer.param_groups[0]['lr']:.2e} ===")
+    for episode in range(start_epoch, total_episodes):
+        print(f"\n=== Episode {episode+1}/{total_episodes} | Buffer: {len(buffer)} | LR: {optimizer.param_groups[0]['lr']:.2e} ===")
         start_time = time.time()
         episode_wins = 0
 
@@ -1080,268 +1405,57 @@ def evaluate(model, num_games=20):
     return model_wins / num_games
 
 # Cell 14: Run training
-# if __name__ == "__main__":
-#     # =============================== #
-#     #   GPU/Colab Environment Check   #
-#     # =============================== #
-#     print("\n===== GPU & Torch Environment Info =====")
-#     print(f"PyTorch version: {torch.__version__}")
-#     print(f"CUDA available: {torch.cuda.is_available()}")
-#     if torch.cuda.is_available():
-#         print(f"CUDA device count: {torch.cuda.device_count()}")
-#         print(f"Current CUDA device: {torch.cuda.current_device()}")
-#         print(f"Device name: {torch.cuda.get_device_name(0)}")
-#         try:
-#             import subprocess
-#             print("Running nvidia-smi for GPU details:")
-#             smi = subprocess.check_output(["nvidia-smi"]).decode()
-#             print(smi)
-#         except Exception:
-#             print("nvidia-smi not available or failed.")
-#         # Test allocation
-#         test_tensor = torch.randn(3, 3).to("cuda")
-#         print(f"Test tensor device: {test_tensor.device}")
-#     else:
-#         print("Warning: CUDA not available! Training will run on CPU and be much slower.")
-#     print("========================================\n")
-
-#     # ============================== #
-#     #   Pick training parameters     #
-#     # ============================== #
-#     try:
-#         n_episodes = int(input("Enter number of training episodes (default 100): ") or 100)
-#     except Exception:
-#         n_episodes = 100
-
-#     # ===== Run Main Training Loop with interrupt save =====
-#     # Patch main_train_loop to accept num_episodes argument if needed
-#     try:
-#         main_train_loop()
-#     except KeyboardInterrupt:
-#         print("\nTraining interrupted by user (KeyboardInterrupt)!")
-#         # Try to save model if available
-#         import sys
-#         model = None
-#         main_globals = sys.modules['__main__'].__dict__
-#         # Try to get model from main_train_loop scope if defined globally
-#         model = main_globals.get('model', None)
-#         try:
-#             if model is not None:
-#                 torch.save(model.state_dict(), "saved_models/interrupted_model.pth")
-#                 print("Model state saved at: saved_models/interrupted_model.pth")
-#         except Exception as e:
-#             print(f"Could not save interrupted model: {e}")
-#     except Exception as e:
-#         print(f"\nUnexpected error: {e}")
-#         import traceback
-#         traceback.print_exc()
-
-# Cell 15: Testcase
-def run_comprehensive_test_suite():
-    print("\n===== COMPREHENSIVE TEST SUITE - ADVANCED SCENARIOS =====")
-    
-    # Test 1: Full game simulation with predefined hands
-    print("\nTest 1: Full Game Simulation - Bomb Finish")
-    game = TienLenGame(1000)
-    # Predefined hands for players
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "5"),
-        game.Card("SPADES", "6"),
-        game.Card("DIAMONDS", "7"),
-        game.Card("CLUBS", "8"),
-        game.Card("HEARTS", "9"),
-        game.Card("SPADES", "10"),
-        game.Card("DIAMONDS", "J"),
-        game.Card("CLUBS", "Q"),
-        game.Card("HEARTS", "K"),
-        game.Card("SPADES", "A"),
-        game.Card("DIAMONDS", "2")
-    ]
-    game.players[1].hand = [
-        game.Card("CLUBS", "3"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "5"),
-        game.Card("DIAMONDS", "6"),
-        game.Card("CLUBS", "7"),
-        game.Card("HEARTS", "8"),
-        game.Card("SPADES", "9"),
-        game.Card("DIAMONDS", "10"),
-        game.Card("CLUBS", "J"),
-        game.Card("HEARTS", "Q"),
-        game.Card("SPADES", "K"),
-        game.Card("DIAMONDS", "A"),
-        game.Card("CLUBS", "2")
-    ]
-    game.players[2].hand = [
-        game.Card("HEARTS", "3"),
-        game.Card("SPADES", "4"),
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "6"),
-        game.Card("HEARTS", "7"),
-        game.Card("SPADES", "8"),
-        game.Card("DIAMONDS", "9"),
-        game.Card("CLUBS", "10"),
-        game.Card("HEARTS", "J"),
-        game.Card("SPADES", "Q"),
-        game.Card("DIAMONDS", "K"),
-        game.Card("CLUBS", "A"),
-        game.Card("HEARTS", "2")
-    ]
-    game.players[3].hand = [
-        game.Card("SPADES", "3"),
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "5"),
-        game.Card("HEARTS", "6"),
-        game.Card("SPADES", "7"),
-        game.Card("DIAMONDS", "8"),
-        game.Card("CLUBS", "9"),
-        game.Card("HEARTS", "10"),
-        game.Card("SPADES", "J"),
-        game.Card("DIAMONDS", "Q"),
-        game.Card("CLUBS", "K"),
-        game.Card("HEARTS", "A"),
-        game.Card("SPADES", "2")
-    ]
-    
-    turn_count = 0
-    while not game.done and turn_count < 100:
-        turn_count += 1
-        player_idx = game.current_player
-        action = game.suggest_bot_action(player_idx)
-        print(f"Turn {turn_count}: Player {player_idx} plays {action[0]} with {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}")
-        
-        try:
-            state, reward, done, _ = game.step(action)
-            if done:
-                print(f"Game finished! Winner: Player {game.winner}")
-                assert game.winner == 0  # Player 0 should win with straight flush
-        except Exception as e:
-            print(f"Error on turn {turn_count}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            break
-    
-    # Test 2: Special case - Four players with only bombs
-    print("\nTest 2: All Players Have Bombs Only")
-    game = TienLenGame(1001)
-    bombs = [
-        [game.Card(suit, rank) for suit in game.SUITS]  # Bomb of same rank
-        for rank in ["4", "5", "6", "7"]
-    ]
-    for i in range(4):
-        game.players[i].hand = bombs[i]
-    
-    for turn in range(1, 10):
-        player_idx = game.current_player
-        action = game.suggest_bot_action(player_idx)
-        print(f"Turn {turn}: Player {player_idx} plays {action[0]} with {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}")
-        
-        try:
-            state, reward, done, _ = game.step(action)
-            if done:
-                print(f"Game finished! Winner: Player {game.winner}")
-        except Exception as e:
-            print(f"Error on turn {turn}: {str(e)}")
-            break
-    
-    # Test 3: Complex bomb interactions
-    print("\nTest 3: Bomb Chain Reactions")
-    game = TienLenGame(1002)
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "3"),
-        game.Card("CLUBS", "3"),
-        game.Card("HEARTS", "3"),
-        game.Card("SPADES", "3"),  # Bomb 3
-        game.Card("DIAMONDS", "8")
-    ]
-    game.players[1].hand = [
-        game.Card("DIAMONDS", "4"),
-        game.Card("CLUBS", "4"),
-        game.Card("HEARTS", "4"),
-        game.Card("SPADES", "4"),  # Bomb 4
-        game.Card("CLUBS", "9")
-    ]
-    game.players[2].hand = [
-        game.Card("DIAMONDS", "5"),
-        game.Card("CLUBS", "5"),
-        game.Card("HEARTS", "5"),
-        game.Card("SPADES", "5"),  # Bomb 5
-        game.Card("HEARTS", "10")
-    ]
-    game.players[3].hand = [
-        game.Card("DIAMONDS", "6"),
-        game.Card("CLUBS", "6"),
-        game.Card("HEARTS", "6"),
-        game.Card("SPADES", "6"),  # Bomb 6
-        game.Card("SPADES", "A")
-    ]
-    
-    # Start with a simple combo
-    game.step(("SINGLE", [game.Card("DIAMONDS", "8")]))
-    print("Started with: SINGLE [8♦]")
-    
-    for turn in range(1, 20):
-        player_idx = game.current_player
-        action = game.suggest_bot_action(player_idx)
-        action_desc = f"{action[0]}: {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}"
-        print(f"Turn {turn}: Player {player_idx} plays {action_desc}")
-        
-        try:
-            state, reward, done, _ = game.step(action)
-            if done:
-                print(f"Game finished! Winner: Player {game.winner}")
-                break
-        except Exception as e:
-            print(f"Error on turn {turn}: {str(e)}")
-            break
-    
-    # Test 4: Win in first move with bomb
-    print("\nTest 4: First Move Bomb Win")
-    game = TienLenGame(1003)
-    game.players[0].hand = [
-        game.Card("DIAMONDS", "A"),
-        game.Card("CLUBS", "A"),
-        game.Card("HEARTS", "A"),
-        game.Card("SPADES", "A")  # Bomb
-    ]
-    # Other players have random cards
-    for i in range(1, 4):
-        game.players[i].hand = [
-            game.Card("DIAMONDS", str(i+2)),
-            game.Card("CLUBS", str(i+3)),
-            game.Card("HEARTS", str(i+4)),
-            game.Card("SPADES", str(i+5))
-        ]
-    
-    action = game.suggest_bot_action(0)
-    print(f"Player 0 plays {action[0]} with {[f'{c.rank}-{c.suit[:1]}' for c in action[1]]}")
-    state, reward, done, _ = game.step(action)
-    assert done and game.winner == 0
-    print("Player 0 wins with bomb on first move!")
-    
-    # Test 5: Impossible to beat combo
-    print("\nTest 5: Unbeatable Final Combo")
-    game = TienLenGame(1004)
-    game.players[0].hand = [game.Card("SPADES", "2")]  # Highest card
-    game.players[1].hand = [game.Card("HEARTS", "2")]  # Lower 2
-    game.players[2].hand = [game.Card("DIAMONDS", "A")]  # Can't beat
-    game.players[3].hand = [game.Card("CLUBS", "K")]  # Can't beat
-    
-    # Player 0 leads with SPADE 2
-    game.step(("SINGLE", [game.Card("SPADES", "2")]))
-    
-    for i in range(1, 4):
-        action = game.suggest_bot_action(i)
-        print(f"Player {i} response: {action[0]}")
-        game.step(action)
-    
-    assert game.current_player == 0 and game.winner is None
-    print("Game continues as expected after unbeatable combo")
-    
-    print("\n===== ALL COMPREHENSIVE TESTS PASSED =====")
-
-# Replace all previous test cases with this comprehensive suite
 if __name__ == "__main__":
-    run_comprehensive_test_suite()
+    # =============================== #
+    #   GPU/Colab Environment Check   #
+    # =============================== #
+    print("\n===== GPU & Torch Environment Info =====")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"Device name: {torch.cuda.get_device_name(0)}")
+        try:
+            import subprocess
+            print("Running nvidia-smi for GPU details:")
+            smi = subprocess.check_output(["nvidia-smi"]).decode()
+            print(smi)
+        except Exception:
+            print("nvidia-smi not available or failed.")
+        # Test allocation
+        test_tensor = torch.randn(3, 3).to("cuda")
+        print(f"Test tensor device: {test_tensor.device}")
+    else:
+        print("Warning: CUDA not available! Training will run on CPU and be much slower.")
+    print("========================================\n")
+
+    # ============================== #
+    #   Pick training parameters     #
+    # ============================== #
+    try:
+        n_episodes = int(input("Enter number of training episodes (default 100): ") or 100)
+    except Exception:
+        n_episodes = 100
+
+    # ===== Run Main Training Loop with interrupt save =====
+    try:
+        main_train_loop(n_episodes)
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user (KeyboardInterrupt)!")
+        # Try to save model if available
+        import sys
+        model = None
+        main_globals = sys.modules['__main__'].__dict__
+        # Try to get model from main_train_loop scope if defined globally
+        model = main_globals.get('model', None)
+        try:
+            if model is not None:
+                torch.save(model.state_dict(), "saved_models/interrupted_model.pth")
+                print("Model state saved at: saved_models/interrupted_model.pth")
+        except Exception as e:
+            print(f"Could not save interrupted model: {e}")
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
+        import traceback
+        traceback.print_exc()
