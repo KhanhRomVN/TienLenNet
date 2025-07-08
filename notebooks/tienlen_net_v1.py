@@ -1,5 +1,3 @@
-notebooks/tienlen_net_v1.py
-
 # Cell 1: Installations
 !pip install torch numpy tqdm lz4 pyarrow
 !mkdir -p logs saved_models
@@ -59,7 +57,7 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-if device == "cuda":
+if device.type == "cuda":
     torch.cuda.manual_seed(SEED)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -325,6 +323,11 @@ class TienLenGame:
 
         # In early game, prefer playing out PAIR/TRIPLE of low card (rank < 5) to "thoát bài" and avoid exposure of combos too soon
         if self.current_combo is None or self.current_combo[0] == "PASS":
+            if game_phase == "early" and random.random() < 0.3:
+                # 30% chance to choose a totally random action (except PASS) to reduce bot difficulty
+                non_pass_actions = [a for a in valid_actions if a[0] != "PASS"]
+                if non_pass_actions:
+                    return random.choice(non_pass_actions)
             if game_phase == "early":
                 # Find low pairs/triples anywhere
                 low_pairs = [a for a in valid_actions
@@ -637,6 +640,10 @@ class TienLenGame:
         player = self.players[self.current_player]
         reward = 0
 
+        # Save previous combo before action for reward shaping
+        prev_combo = self.current_combo
+        prev_last_combo_player = getattr(self, "last_combo_player", None)
+
         if action_type != "PASS":
             # Remove card by value (suit and rank), not by object identity
             for card in cards:
@@ -662,6 +669,24 @@ class TienLenGame:
             # Only allow PASS if there's a current combo to pass on
             if self.current_combo is None:
                 raise ValueError("Cannot PASS when there's no current combo")
+
+        # ======= Reward Shaping: Encourage playing cards and blocking combos =======
+        if action_type != "PASS":
+            # Small reward for playing cards
+            reward += 0.1 * len(cards)
+            # Reward for breaking combo: if responding to another player's combo and beating it
+            broke_combo = False
+            if (
+                prev_combo is not None
+                and prev_combo[0] != "PASS"
+                and prev_last_combo_player is not None
+                and prev_last_combo_player != self.current_player
+                and self.get_combo_value((action_type, cards)) > self.get_combo_value(prev_combo)
+                and action_type == prev_combo[0]
+            ):
+                broke_combo = True
+            if broke_combo:
+                reward += 0.2
 
         # Record action
         self.history.append((self.current_player, action))
@@ -884,7 +909,7 @@ class Node:
 
 # Cell 7: MCTS with continual resolving and caching (unchanged)
 class MCTS:
-    def __init__(self, model, num_simulations=5, use_cache=True, use_continual_resolving=True):
+    def __init__(self, model, num_simulations=50, use_cache=True, use_continual_resolving=True):
         self.model = model
         self.num_simulations = num_simulations
         self.use_cache = use_cache
@@ -901,13 +926,13 @@ class MCTS:
         import time
         start_time = time.time()
         for _ in range(self.num_simulations):
-            # Break if over 100ms wall time
-            if time.time() - start_time > 0.1:
+            # Break if over 500ms wall time
+            if time.time() - start_time > 0.5:
                 break
             node = root
             tmp_game = node.game_instance.copy()
             depth = 0
-            max_depth = 20  # Was 100
+            max_depth = 50  # Increased from 20
             while not node.is_leaf() and depth < max_depth:
                 node = node.select_child()
                 if self.use_continual_resolving and not node.resolved:
