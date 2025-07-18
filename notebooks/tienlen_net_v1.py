@@ -1,3 +1,4 @@
+
 # Cell 1: Installations
 !pip install torch numpy tqdm lz4 pyarrow
 !mkdir -p logs saved_models
@@ -270,7 +271,8 @@ class TienLenGame:
             'PAIR': 100,
             'TRIPLE': 200,
             'STRAIGHT': 300,
-            'BOMB': 1000  # Bomb always highest
+            'BOMB': 1000,  # Bomb always highest
+            'CONSEC_PAIRS': 400  # Value for three consecutive pairs (ba đôi thông)
         }[combo_type]
 
         if combo_type == "SINGLE":
@@ -279,6 +281,15 @@ class TienLenGame:
             # '2' (Heo) is naturally assigned as rank_val=12, which sorts after all others
             value = base_value + (rank_val * 4 + self.SUIT_ORDER[card.suit])
             return value
+
+        elif combo_type == "CONSEC_PAIRS":
+            # Highest rank among the 3 pairs
+            highest_rank_val = max(self.RANK_VALUES[card.rank] for card in cards)
+            # Get all cards of this rank
+            highest_rank_cards = [c for c in cards if self.RANK_VALUES[c.rank] == highest_rank_val]
+            # Pick the one with the highest suit
+            max_suit = max(highest_rank_cards, key=lambda c: self.SUIT_ORDER[c.suit])
+            return base_value + (highest_rank_val * 4 + self.SUIT_ORDER[max_suit.suit])
 
         elif combo_type in ["PAIR", "TRIPLE", "BOMB"]:
             rank_val = self.RANK_VALUES[cards[0].rank]
@@ -909,7 +920,7 @@ class Node:
 
 # Cell 7: MCTS with continual resolving and caching (unchanged)
 class MCTS:
-    def __init__(self, model, num_simulations=50, use_cache=True, use_continual_resolving=True):
+    def __init__(self, model, num_simulations=200, use_cache=True, use_continual_resolving=True):
         self.model = model
         self.num_simulations = num_simulations
         self.use_cache = use_cache
@@ -932,7 +943,7 @@ class MCTS:
             node = root
             tmp_game = node.game_instance.copy()
             depth = 0
-            max_depth = 50  # Increased from 20
+            max_depth = 200
             while not node.is_leaf() and depth < max_depth:
                 node = node.select_child()
                 if self.use_continual_resolving and not node.resolved:
@@ -1267,7 +1278,7 @@ def main_train_loop(total_episodes=500):
     print(f"Model architecture:\n{model}")
 
     # Load model if exists
-    model_path = "saved_models/tien_len_net.pth"
+    model_path = "saved_models/TienLenNetV1.pth"
     start_epoch = 0
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device))
@@ -1295,12 +1306,13 @@ def main_train_loop(total_episodes=500):
     else:
         scaler = DummyScaler()
 
-    # Optimize episodes & buffer size for speed
-    games_per_episode = 10    # Lower for faster loop (from 30)
-    training_steps = 50       # Lower for faster loop (from 100)
-    min_buffer_size = 500     # ↓ lower requirement to enable early training
-    batch_size = 512          # Increase batch size for better GPU utilization (from 256)
+    # AI Feedback: Training process improvements
+    games_per_episode = 30    # Increased from 10
+    training_steps = 50       # Same as original
+    min_buffer_size = 200     # Lower from 500
+    batch_size = 512          # Unchanged
     best_win_rate = 0.0
+    strong_performance_count = 0  # For early stopping
 
     for episode in range(start_epoch, total_episodes):
         print(f"\n=== Episode {episode+1}/{total_episodes} | Buffer: {len(buffer)} | LR: {optimizer.param_groups[0]['lr']:.2e} ===")
@@ -1350,18 +1362,28 @@ def main_train_loop(total_episodes=500):
             avg_loss = sum(train_losses) / len(train_losses)
             scheduler.step(avg_loss)
 
+        # Early stopping if strong performance for 3 evals > 60%
         if (episode+1) % 10 == 0:
             print("Evaluating model...")
             eval_start = time.time()
-            win_rate = evaluate(model, num_games=20)
+            win_rate_eval = evaluate(model, num_games=20)
             eval_time = time.time() - eval_start
-            print(f"Evaluation completed in {eval_time:.2f}s | Win rate: {win_rate:.2f}")
+            print(f"Evaluation completed in {eval_time:.2f}s | Win rate: {win_rate_eval:.2f}")
 
-            if win_rate > best_win_rate:
-                best_win_rate = win_rate
-                best_path = f"saved_models/best_tien_len_net_ep{episode+1}_win{win_rate:.2f}.pth"
+            if win_rate_eval >= 0.6:
+                strong_performance_count += 1
+                print(f"Strong eval performance count: {strong_performance_count}/3")
+                if strong_performance_count >= 3:
+                    print("Stopping early - consistent strong performance!")
+                    break
+            else:
+                strong_performance_count = 0
+
+            if win_rate_eval > best_win_rate:
+                best_win_rate = win_rate_eval
+                best_path = f"saved_models/best_tien_len_net_ep{episode+1}_win{win_rate_eval:.2f}.pth"
                 torch.save(model.state_dict(), best_path)
-                print(f"Saved new best model with win rate {win_rate:.2f}!")
+                print(f"Saved new best model with win rate {win_rate_eval:.2f}!")
 
         save_path = f"saved_models/tien_len_net_ep{episode+1}.pth"
         torch.save(model.state_dict(), save_path)
