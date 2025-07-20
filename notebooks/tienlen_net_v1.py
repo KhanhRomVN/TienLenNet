@@ -1,9 +1,6 @@
-
-# Cell 1: Installations
 !pip install torch numpy tqdm lz4 pyarrow
 !mkdir -p logs saved_models
 
-# Cell 2: Imports 
 import os
 import random
 import numpy as np
@@ -23,6 +20,7 @@ import lz4.frame
 import glob
 import gc
 import itertools
+import sys
 
 # Function to convert Card to JSON-serializable dict
 def card_to_json(card):
@@ -50,7 +48,7 @@ def setup_logger(log_id):
         logger.addHandler(fh)
     return logger
 
-# Cell 3: Device and seed setup
+# Device and seed setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
@@ -63,13 +61,13 @@ if device.type == "cuda":
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# Cell 4: TienLenGame implementation with improved bot logic (unchanged)
+# TienLenGame implementation with improved bot logic
 class TienLenGame:
     RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2']
     SUITS = ['DIAMONDS', 'CLUBS', 'HEARTS', 'SPADES']
     RANK_VALUES = {rank: i for i, rank in enumerate(RANKS)}
     SUIT_ORDER = {suit: i for i, suit in enumerate(SUITS)}
-    COMBO_TYPES = ['SINGLE', 'PAIR', 'TRIPLE', 'STRAIGHT', 'BOMB']
+    COMBO_TYPES = ['SINGLE', 'PAIR', 'TRIPLE', 'STRAIGHT', 'BOMB', 'CONSEC_PAIRS']
 
     class Card:
         __slots__ = ('suit', 'rank')
@@ -97,6 +95,7 @@ class TienLenGame:
         self.history = []
         self._initialize_deck()
         self._deal_cards()
+        self.broke_combo = False  # Track if player broke opponent's combo
 
     def set_current_combo(self, combo):
         """Helper to consistently update current combo and last player"""
@@ -116,9 +115,6 @@ class TienLenGame:
             player.hand.sort(key=lambda c: (self.RANK_VALUES[c.rank], self.SUIT_ORDER[c.suit]))
 
     def get_valid_combos(self, player_idx, use_cache=True):
-        """
-        Return ALL valid combos for a player, fully expanded and filtered based on current combo on the table, strictly following Tiến Lên rules.
-        """
         try:
             player = self.players[player_idx]
             valid_combos = [("PASS", [])]
@@ -167,11 +163,11 @@ class TienLenGame:
                     card_groups.setdefault(card.rank, []).append(card)
 
                 # try every possible straight starting position and length
-                for start_rank in range(len(TienLenGame.RANKS) - 2):
-                    for length in range(3, len(TienLenGame.RANKS) - start_rank + 1):
+                for start_idx in range(len(TienLenGame.RANKS) - 2):
+                    for length in range(3, len(TienLenGame.RANKS) - start_idx + 1):
                         straight = []
                         for i in range(length):
-                            rank = TienLenGame.RANKS[start_rank + i]
+                            rank = TienLenGame.RANKS[start_idx + i]
                             if rank in card_groups and card_groups[rank]:
                                 card = min(card_groups[rank], key=lambda c: self.SUIT_ORDER[c.suit])
                                 straight.append(card)
@@ -187,8 +183,6 @@ class TienLenGame:
             valid_combos += get_triples()
             valid_combos += get_straights()
             valid_combos += get_bombs()
-
-            # Add 3 consecutive pairs (ba đôi thông) if any
             valid_combos += self.get_consecutive_pairs(player)
 
             # STRICT FILTERING if there's a current combo to compare against
@@ -245,16 +239,18 @@ class TienLenGame:
 
     def get_consecutive_pairs(self, player):
         # "3 đôi thông" = 3 consecutive pairs (6 cards, ranks must be consecutive, and each pair same rank)
-        ranks = [self.RANK_VALUES[card.rank] for card in player.hand]
+        rank_values = sorted(set(self.RANK_VALUES[card.rank] for card in player.hand))
         available_pairs = {}
-        for rank in TienLenGame.RANKS:
+        for rank_val in rank_values:
+            rank = self.RANKS[rank_val]
             cards_of_rank = [card for card in player.hand if card.rank == rank]
             if len(cards_of_rank) >= 2:
-                available_pairs[self.RANK_VALUES[rank]] = cards_of_rank
+                available_pairs[rank_val] = cards_of_rank
+        
         combos = []
         sorted_ranks = sorted(available_pairs.keys())
         for i in range(len(sorted_ranks) - 2):
-            r0, r1, r2 = sorted_ranks[i:i+3]
+            r0, r1, r2 = sorted_ranks[i], sorted_ranks[i+1], sorted_ranks[i+2]
             if r1 == r0 + 1 and r2 == r1 + 1:
                 cards = []
                 for r in [r0, r1, r2]:
@@ -271,14 +267,13 @@ class TienLenGame:
             'PAIR': 100,
             'TRIPLE': 200,
             'STRAIGHT': 300,
-            'BOMB': 1000,  # Bomb always highest
-            'CONSEC_PAIRS': 400  # Value for three consecutive pairs (ba đôi thông)
+            'BOMB': 1000,
+            'CONSEC_PAIRS': 400
         }[combo_type]
 
         if combo_type == "SINGLE":
             card = cards[0]
             rank_val = self.RANK_VALUES[card.rank]
-            # '2' (Heo) is naturally assigned as rank_val=12, which sorts after all others
             value = base_value + (rank_val * 4 + self.SUIT_ORDER[card.suit])
             return value
 
@@ -330,53 +325,42 @@ class TienLenGame:
         total_cards_played = 52 - sum(len(p.hand) for p in self.players)
         game_phase = "early" if total_cards_played < 15 else "mid" if total_cards_played < 35 else "late"
 
-        # === Improved action logic for bot (early combos, pairs/triples, bombs, better low card use) ===
-
-        # In early game, prefer playing out PAIR/TRIPLE of low card (rank < 5) to "thoát bài" and avoid exposure of combos too soon
+        # === Improved action logic for bot ===
         if self.current_combo is None or self.current_combo[0] == "PASS":
             if game_phase == "early" and random.random() < 0.3:
-                # 30% chance to choose a totally random action (except PASS) to reduce bot difficulty
                 non_pass_actions = [a for a in valid_actions if a[0] != "PASS"]
                 if non_pass_actions:
                     return random.choice(non_pass_actions)
             if game_phase == "early":
-                # Find low pairs/triples anywhere
                 low_pairs = [a for a in valid_actions
                             if a[0] in ["PAIR", "TRIPLE"]
                             and max(self.RANK_VALUES[c.rank] for c in a[1]) < 5]
                 if low_pairs:
                     return random.choice(low_pairs)
-                # Prefer lowest singles first if available
                 low_singles = [a for a in valid_actions
                                if a[0] == "SINGLE" and self.RANK_VALUES[a[1][0].rank] < 5]
                 if low_singles:
                     return min(low_singles, key=lambda a: self.get_combo_value(a))
-
-                # Fall back to smaller chains/straights of length 3-4 only instead of exposing long straights
                 short_chains = [a for a in valid_actions if a[0] == "STRAIGHT" and 3 <= len(a[1]) <= 4]
                 if short_chains:
                     return min(short_chains, key=lambda a: self.get_combo_value(a))
 
-            # Prefer not to play very long straights unless nothing else
             long_chains = [a for a in valid_actions if a[0] == "STRAIGHT" and len(a[1]) > 4]
             if long_chains:
                 other_non_pass = [a for a in valid_actions if a[0] != "PASS" and a[0] != "STRAIGHT"]
                 if other_non_pass:
                     return min(other_non_pass, key=lambda a: self.get_combo_value(a))
 
-            # Try using "3 đôi thông" (if implemented and valid in get_valid_combos)
             consecutive_pairs = [a for a in valid_actions if a[0] == "CONSEC_PAIRS"]
             if consecutive_pairs:
                 return consecutive_pairs[0]
 
-            # Default fallback
             if game_phase == "early" or game_phase == "mid":
                 low_actions = [a for a in valid_actions
                                if max(self.RANK_VALUES[c.rank] for c in a[1]) < 5]
                 if low_actions:
                     return random.choice(low_actions)
 
-            # Use original fallback strategy
             if game_phase == "early":
                 return self.early_game_lead(hand, valid_actions, hand_strength, chain_potential)
             elif game_phase == "mid":
@@ -385,13 +369,11 @@ class TienLenGame:
                 return self.late_game_lead(hand, valid_actions, opponent_profile)
 
         # Non-leading/responding to a current combo:
-        # Randomly allow bomb use (about 30%) if available and current combo is not a BOMB
         if self.current_combo and self.current_combo[0] != "BOMB":
             bombs = [a for a in valid_actions if a[0] == "BOMB"]
             if bombs and random.random() < 0.3:
                 return min(bombs, key=lambda a: self.get_combo_value(a))
 
-        # Otherwise use original strategic response
         return self.response_strategy(player_idx, valid_actions, game_phase, hand_strength)
 
     def get_played_cards(self):
@@ -403,7 +385,6 @@ class TienLenGame:
 
     def get_remaining_cards(self, played_cards):
         all_cards = [self.Card(suit, rank) for suit in self.SUITS for rank in self.RANKS]
-        # This will be O(n^2) but that's ok for small N, else Card needs __eq__
         remaining = []
         for card in all_cards:
             found = False
@@ -416,17 +397,18 @@ class TienLenGame:
         return remaining
 
     def estimate_opponent_hands(self, remaining_cards):
-        opponent_hands = {i: [] for i in range(4) if i != self.current_player}
+        opponent_hands = {i: [] for i in range(4)}
         card_counts = {}
         for card in remaining_cards:
-            card_counts[(card.suit, card.rank)] = card_counts.get((card.suit, card.rank), 0) + 1
-        # Adjust based on observed plays (will be reflected in played/remaining)
+            key = (card.suit, card.rank)
+            card_counts[key] = card_counts.get(key, 0) + 1
+        
+        # Distribute cards to opponents
         for card in remaining_cards:
             possible_owners = [i for i in range(4) if i != self.current_player]
-            for owner in possible_owners:
-                if random.random() < (1.0 / len(possible_owners)):
-                    opponent_hands[owner].append(card)
-                    break
+            owner = random.choice(possible_owners)
+            opponent_hands[owner].append(card)
+            
         return opponent_hands
 
     def calculate_hand_strength(self, hand, opponent_profile):
@@ -434,8 +416,9 @@ class TienLenGame:
         combo_potential = self.identify_combo_potential(hand)
         flexibility = self.calculate_hand_flexibility(hand)
         opponent_pressure = 0
-        for cards in opponent_profile.values():
-            opponent_pressure += sum(1 for card in cards if card.rank in ['A', '2'])
+        for player_id, cards in opponent_profile.items():
+            if player_id != self.current_player:
+                opponent_pressure += sum(1 for card in cards if card.rank in ['A', '2'])
         strength = (card_values * 0.3 + combo_potential * 0.4 + flexibility * 0.2 -
                     opponent_pressure * 0.1)
         return strength
@@ -449,6 +432,7 @@ class TienLenGame:
             if count >= 2: score += 2
             if count >= 3: score += 3
             if count >= 4: score += 5
+        
         sorted_ranks = sorted(set(self.RANK_VALUES[card.rank] for card in hand))
         chain_length = 0
         max_chain = 0
@@ -463,11 +447,15 @@ class TienLenGame:
         return score
 
     def calculate_hand_flexibility(self, hand):
-        flexibility = 0
-        ranks = [card.rank for card in hand]
-        flexibility += len(hand)
-        flexibility += sum(1 for rank in set(ranks) if ranks.count(rank) >= 2) * 2
-        flexibility += sum(1 for rank in set(ranks) if ranks.count(rank) >= 3) * 3
+        flexibility = len(hand)
+        rank_counts = {}
+        for card in hand:
+            rank_counts[card.rank] = rank_counts.get(card.rank, 0) + 1
+        
+        for count in rank_counts.values():
+            if count >= 2: flexibility += 2
+            if count >= 3: flexibility += 3
+            
         for length in range(3, 6):
             if self.can_make_chain(hand, length):
                 flexibility += length * 2
@@ -480,7 +468,8 @@ class TienLenGame:
             return self.conservative_lead(hand, valid_actions, chain_potential)
 
     def mid_game_lead(self, hand, valid_actions, opponent_profile, bomb_potential):
-        weak_opponents = sum(1 for cards in opponent_profile.values() if len(cards) > 8)
+        weak_opponents = sum(1 for i, p in enumerate(self.players) 
+                          if i != self.current_player and len(p.hand) > 8)
         if weak_opponents >= 2:
             return self.aggressive_lead(hand, valid_actions)
         elif bomb_potential:
@@ -490,7 +479,8 @@ class TienLenGame:
         return self.conservative_lead(hand, valid_actions, None)
 
     def late_game_lead(self, hand, valid_actions, opponent_profile):
-        shortest_opponent = min(len(cards) for cards in opponent_profile.values())
+        opponent_hand_sizes = [len(p.hand) for i, p in enumerate(self.players) if i != self.current_player]
+        shortest_opponent = min(opponent_hand_sizes) if opponent_hand_sizes else 0
         if len(hand) <= shortest_opponent + 2:
             return self.aggressive_lead(hand, valid_actions)
         else:
@@ -656,7 +646,7 @@ class TienLenGame:
         prev_last_combo_player = getattr(self, "last_combo_player", None)
 
         if action_type != "PASS":
-            # Remove card by value (suit and rank), not by object identity
+            # Remove card by value (suit and rank)
             for card in cards:
                 found = False
                 for idx, hand_card in enumerate(player.hand):
@@ -676,15 +666,18 @@ class TienLenGame:
                 return self.get_state(), reward, True, {}
             # Only set current combo if not win
             self.set_current_combo((action_type, cards))
+            self.broke_combo = False
         else:
             # Only allow PASS if there's a current combo to pass on
             if self.current_combo is None:
                 raise ValueError("Cannot PASS when there's no current combo")
+            self.broke_combo = False
 
         # ======= Reward Shaping: Encourage playing cards and blocking combos =======
         if action_type != "PASS":
             # Small reward for playing cards
             reward += 0.1 * len(cards)
+            
             # Reward for breaking combo: if responding to another player's combo and beating it
             broke_combo = False
             if (
@@ -696,8 +689,23 @@ class TienLenGame:
                 and action_type == prev_combo[0]
             ):
                 broke_combo = True
-            if broke_combo:
+                reward += 0.5
+                self.broke_combo = True
+                
+            # Bonus for playing low cards in early game
+            total_played = 52 - sum(len(p.hand) for p in self.players)
+            if total_played < 20 and all(card.rank in ['3','4','5','6'] for card in cards):
                 reward += 0.2
+                
+            # Penalty for playing high cards too early
+            if total_played < 10 and any(card.rank in ['A','2'] for card in cards):
+                reward -= 0.3
+                
+            # Bonus for saving bombs
+            if action_type == "BOMB" and total_played < 30:
+                reward -= 0.4  # Penalize early bomb use
+            elif action_type == "BOMB" and total_played > 40:
+                reward += 0.6  # Reward late bomb use
 
         # Record action
         self.history.append((self.current_player, action))
@@ -714,8 +722,7 @@ class TienLenGame:
                 break
         if pass_count >= 3:
             self.current_combo = None
-            # Return turn to last_combo_player after reset,
-            # but only if it's defined (not None). Otherwise, go to player 0.
+            # Return turn to last_combo_player after reset
             self.current_player = self.last_combo_player if self.last_combo_player is not None else 0
 
         return self.get_state(), reward, self.done, {}
@@ -760,22 +767,24 @@ class TienLenGame:
         new_game.players = []
         for player in self.players:
             new_player = new_game.Player(player.player_id)
-            new_player.hand = player.hand[:]  # Shallow copy since Cards are immutable
+            new_player.hand = [new_game.Card(c.suit, c.rank) for c in player.hand]
             new_game.players.append(new_player)
 
         new_game.current_player = self.current_player
         if self.current_combo:
-            new_game.current_combo = (self.current_combo[0], self.current_combo[1][:])
+            new_game.current_combo = (self.current_combo[0], 
+                                      [new_game.Card(c.suit, c.rank) for c in self.current_combo[1]])
         new_game.last_combo_player = self.last_combo_player
         new_game.done = self.done
         new_game.winner = self.winner
-        new_game.history = self.history[:]
+        new_game.history = copy.deepcopy(self.history)
+        new_game.broke_combo = self.broke_combo
         return new_game
 
     def __repr__(self):
         return f"TienLenGame(player={self.current_player}, done={self.done}, winner={self.winner})"
 
-# Cell 5: Network architecture with residual blocks (unchanged)
+# Network architecture with residual blocks
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels):
         super(ResidualBlock, self).__init__()
@@ -841,13 +850,127 @@ class TienLenNet(nn.Module):
 
         return p, v
 
-# Cell 6: Node for MCTS with continual resolving (unchanged)
+# Rewind Mechanism
+class RewindBuffer:
+    def __init__(self, max_depth=5):
+        self.buffer = deque(maxlen=max_depth)
+        self.current_index = -1
+    
+    def push(self, game_state, action):
+        self.buffer.append((copy.deepcopy(game_state), action))
+        self.current_index = len(self.buffer) - 1
+    
+    def rewind(self, steps=1):
+        if self.current_index - steps >= 0:
+            self.current_index -= steps
+            return self.buffer[self.current_index][0]
+        return None
+
+    def get_current_state(self):
+        return self.buffer[self.current_index][0] if self.current_index >= 0 else None
+
+# Strategic Experience Replay
+class StrategicReplayBuffer(ReplayBuffer):
+    def __init__(self, capacity=100000):
+        super().__init__(capacity)
+        self.priorities = deque(maxlen=capacity)
+        self.win_probs = deque(maxlen=capacity)
+
+    def push(self, trajectory, win_prob):
+        compressed = lz4.frame.compress(pickle.dumps(trajectory))
+        if len(self.buffer) >= self.capacity:
+            self.buffer.popleft()
+            self.priorities.popleft()
+            self.win_probs.popleft()
+        self.buffer.append(compressed)
+        self.priorities.append(win_prob)
+        self.win_probs.append(win_prob)
+
+    def sample(self, batch_size, win_sample_ratio=0.7):
+        # Separate wins and losses
+        win_indices = [i for i, wp in enumerate(self.win_probs) if wp > 0.7]
+        loss_indices = [i for i, wp in enumerate(self.win_probs) if wp <= 0.7]
+        
+        # Calculate sample sizes
+        win_sample_size = min(int(batch_size * win_sample_ratio), len(win_indices))
+        loss_sample_size = min(batch_size - win_sample_size, len(loss_indices))
+        
+        # Sample from wins and losses
+        win_samples = random.sample(win_indices, win_sample_size) if win_indices else []
+        loss_samples = random.sample(loss_indices, loss_sample_size) if loss_indices else []
+        
+        # Combine samples
+        samples = win_samples + loss_samples
+        random.shuffle(samples)
+        
+        # Decompress and return
+        return [pickle.loads(lz4.frame.decompress(self.buffer[i])) for i in samples]
+
+# MCTS with continual resolving and caching
+class MCTS:
+    def __init__(self, model, num_simulations=500, use_cache=True, use_continual_resolving=True):
+        self.model = model
+        self.num_simulations = num_simulations
+        self.use_cache = use_cache
+        self.use_continual_resolving = use_continual_resolving
+        self.state_cache = {}
+        self.action_cache = {}
+
+    def run(self, game):
+        root = Node(game.copy(), model=self.model)
+        try:
+            root.resolve()
+        except Exception as e:
+            return np.zeros(200)
+        
+        start_time = time.time()
+        for _ in range(self.num_simulations):
+            if time.time() - start_time > 0.5:
+                break
+                
+            node = root
+            tmp_game = node.game_instance.copy()
+            depth = 0
+            max_depth = 200
+            
+            while not node.is_leaf() and depth < max_depth:
+                node = node.select_child()
+                if self.use_continual_resolving and not node.resolved:
+                    try:
+                        node.resolve()
+                    except Exception:
+                        break
+                tmp_game = node.game_instance.copy()
+                depth += 1
+                if tmp_game.done:
+                    break
+                    
+            if not tmp_game.done:
+                state = tmp_game.get_state()
+                state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
+                with torch.no_grad():
+                    _, value = self.model(state_tensor)
+                value = value.item()
+            else:
+                value = 1.0 if tmp_game.winner == 0 else -1.0
+                
+            node.update(value)
+            
+        action_probs = np.zeros(200)
+        total_visits = sum(child.n for child in root.children)
+        if total_visits > 0:
+            for child in root.children:
+                idx = action_to_id(child.action)
+                action_probs[idx] = child.n / total_visits
+        else:
+            action_probs = np.ones(200) / 200
+            
+        return action_probs
+
+# Node for MCTS with continual resolving
 class Node:
     def __init__(self, game_instance, parent=None, action=None, model=None):
-        if hasattr(game_instance, "current_player") and game_instance.current_player != 0:
-            self.game_instance = game_instance  # No copy for bot
-        else:
-            self.game_instance = game_instance.copy()
+        self.game_instance = game_instance.copy()
         self.parent = parent
         self.action = action
         self.children = []
@@ -857,7 +980,7 @@ class Node:
         self.valid_actions = None
         self.state_key = None
         self.model = model
-        self.resolved = False  # For continual resolving
+        self.resolved = False
         self.depth = (parent.depth + 1) if parent is not None and hasattr(parent, 'depth') else 0
 
     def select_child(self):
@@ -880,7 +1003,6 @@ class Node:
             self.parent.update(-value)
 
     def resolve(self):
-        # Only resolve for RL agent (player 0), never for bot nodes!
         if self.game_instance.current_player != 0:
             self.resolved = True
             return 0.0
@@ -910,79 +1032,13 @@ class Node:
             return value.item()
         except Exception as e:
             print(f"Resolve failed: {e}")
-            import traceback
-            traceback.print_exc()
             self.resolved = True
             return 0.0
 
     def is_leaf(self):
         return not self.children
 
-# Cell 7: MCTS with continual resolving and caching (unchanged)
-class MCTS:
-    def __init__(self, model, num_simulations=500, use_cache=True, use_continual_resolving=True):
-        self.model = model
-        self.num_simulations = num_simulations
-        self.use_cache = use_cache
-        self.use_continual_resolving = use_continual_resolving
-        self.state_cache = {}
-        self.action_cache = {}
-
-    def run(self, game):
-        root = Node(game.copy(), model=self.model)
-        try:
-            root.resolve()
-        except Exception as e:
-            return np.zeros(200)
-        import time
-        start_time = time.time()
-        for _ in range(self.num_simulations):
-            # Break if over 500ms wall time
-            if time.time() - start_time > 0.5:
-                break
-            node = root
-            tmp_game = node.game_instance.copy()
-            depth = 0
-            max_depth = 200
-            while not node.is_leaf() and depth < max_depth:
-                node = node.select_child()
-                if self.use_continual_resolving and not node.resolved:
-                    try:
-                        node.resolve()
-                    except Exception:
-                        break
-                tmp_game = node.game_instance.copy()
-                depth += 1
-                if tmp_game.done:
-                    break
-            if not tmp_game.done:
-                state = tmp_game.get_state()
-                state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
-                if device.type == "cuda":
-                    with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.float16):
-                        _, value = self.model(state_tensor)
-                else:
-                    with torch.no_grad():
-                        _, value = self.model(state_tensor)
-                value = value.item()
-            else:
-                value = 1.0 if tmp_game.winner == 0 else -1.0
-            node.update(value)
-        action_probs = np.zeros(200)
-        total_visits = sum(child.n for child in root.children)
-        if total_visits > 0:
-            for child in root.children:
-                action_str = json.dumps({
-                    "type": child.action[0],
-                    "cards": [card_to_json(c) for c in child.action[1]]
-                })
-                idx = action_to_id(child.action)
-                action_probs[idx] = child.n / total_visits
-        else:
-            action_probs = np.ones(200) / 200
-        return action_probs
-
-# Cell 8: PPO Replay Buffer with trajectory storage (unchanged)
+# PPO Replay Buffer with trajectory storage
 class PPOBuffer:
     def __init__(self, gamma=0.99, gae_lambda=0.95):
         self.states = []
@@ -1013,6 +1069,7 @@ class PPOBuffer:
     def compute_advantages(self):
         advantages = np.zeros_like(self.rewards, dtype=np.float32)
         last_advantage = 0
+        last_value = 0
 
         # Calculate advantages using GAE
         for t in reversed(range(len(self.rewards))):
@@ -1038,210 +1095,20 @@ class PPOBuffer:
         values = np.array(self.values)
         returns = advantages + values
 
-        return states, actions, log_probs, returns, advantages, values
+        return {
+            'states': states,
+            'actions': actions,
+            'log_probs': log_probs,
+            'returns': returns,
+            'advantages': advantages,
+            'values': values
+        }
 
     def __len__(self):
         return len(self.states)
 
-# Cell 9: Replay Buffer for PPO (single-thread, no locks or threading)
-class ReplayBuffer:
-    def __init__(self, capacity=100000):
-        self.capacity = capacity
-        self.buffer = deque(maxlen=capacity)
-        self.compression_enabled = True
-
-    def push(self, trajectory):
-        if self.compression_enabled:
-            compressed = lz4.frame.compress(pickle.dumps(trajectory))
-            if len(self.buffer) >= self.capacity:
-                self.buffer.popleft()
-            self.buffer.append(compressed)
-        else:
-            if len(self.buffer) >= self.capacity:
-                self.buffer.popleft()
-            self.buffer.append(trajectory)
-
-    def sample(self, batch_size):
-        samples = random.sample(self.buffer, min(batch_size, len(self.buffer)))
-        if self.compression_enabled:
-            return [pickle.loads(lz4.frame.decompress(s)) for s in samples]
-        return samples
-
-    def __len__(self):
-        return len(self.buffer)
-
-# Cell 10: PPO Training Function (unchanged)
-def ppo_train(model, buffer, optimizer, scaler, clip_epsilon=0.2, ppo_epochs=4, batch_size=128):
-    if len(buffer) < batch_size:
-        return None
-
-    trajectories = buffer.sample(batch_size)
-    total_loss = 0.0
-    total_policy_loss = 0.0
-    total_value_loss = 0.0
-    total_entropy_loss = 0.0
-
-    for trajectory in trajectories:
-        states, actions, old_log_probs, returns, advantages, old_values = trajectory
-
-        # Convert to tensors
-        states = torch.tensor(states).float().to(device)
-        actions = torch.tensor(actions).long().to(device)
-        old_log_probs = torch.tensor(old_log_probs).float().to(device)
-        returns = torch.tensor(returns).float().to(device)
-        advantages = torch.tensor(advantages).float().to(device)
-        old_values = torch.tensor(old_values).float().to(device)
-
-        # PPO update
-        for _ in range(ppo_epochs):
-            # Get new policy and values
-            policy_pred, value_pred = model(states)
-            value_pred = value_pred.squeeze()
-
-            # Calculate new log probabilities
-            dist = torch.distributions.Categorical(logits=policy_pred)
-            new_log_probs = dist.log_prob(actions)
-
-            # Policy loss (clipped surrogate)
-            ratio = (new_log_probs - old_log_probs).exp()
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            # Value loss (clipped)
-            value_pred_clipped = old_values + torch.clamp(value_pred - old_values, -clip_epsilon, clip_epsilon)
-            value_loss1 = F.mse_loss(value_pred, returns)
-            value_loss2 = F.mse_loss(value_pred_clipped, returns)
-            value_loss = torch.max(value_loss1, value_loss2).mean()
-
-            # Entropy bonus
-            entropy_loss = -dist.entropy().mean()
-
-            # Total loss
-            loss = policy_loss + 0.5 * value_loss + 0.05 * entropy_loss
-
-            # Backpropagation
-            optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            total_loss += loss.item()
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            total_entropy_loss += entropy_loss.item()
-
-    num_updates = len(trajectories) * ppo_epochs
-    return (
-        total_loss / num_updates,
-        total_policy_loss / num_updates,
-        total_value_loss / num_updates,
-        total_entropy_loss / num_updates
-    )
-
-# Cell 11: Self-play game function (replaces SelfPlayWorker/Ray)
-def self_play_game(model, game_id, model_pool=None, use_continual_resolving=True):
-    game = TienLenGame(game_id)
-    ppo_buffer = PPOBuffer()
-    current_model = model
-
-    if model_pool and random.random() < 0.25:
-        model_path = random.choice(model_pool)
-        current_model = TienLenNet().to(device)
-        current_model.load_state_dict(torch.load(model_path, map_location=device))
-        current_model.eval()
-
-    # Use MCTS with optimized default number of simulations (num_simulations=10)
-    mcts = MCTS(current_model, num_simulations=500)
-
-    turn_count = 0
-    while not game.done and turn_count < 500:
-        turn_count += 1
-        current_player = game.current_player
-        start_turn_time = time.time()
-
-        if current_player == 0:
-            # RL player's turn -- Only here we use MCTS!
-            if device.type == "cuda":
-                with torch.no_grad(), torch.autocast(device_type='cuda', dtype=torch.float16):
-                    action_probs = mcts.run(game)
-            else:
-                action_probs = mcts.run(game)
-
-            valid_actions = game.get_valid_combos(current_player, use_cache=True)
-            if valid_actions:
-                valid_probs = []
-                for action in valid_actions:
-                    action_str = json.dumps({
-                        "type": action[0],
-                        "cards": [card_to_json(c) for c in action[1]]
-                    })
-                    idx = action_to_id(action)
-                    valid_probs.append(action_probs[idx])
-
-                valid_probs = np.array(valid_probs)
-                if valid_probs.sum() > 0:
-                    valid_probs /= valid_probs.sum()
-                else:
-                    valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
-
-                action_idx = np.random.choice(len(valid_actions), p=valid_probs)
-                action = valid_actions[action_idx]
-                log_prob = np.log(valid_probs[action_idx] + 1e-10)
-
-                # Log RL agent action
-                action_description = f"{action[0]}: {[f'{c.rank}_{c.suit[:1]}' for c in action[1]]}"
-                print(f"[RL] Player 0 action: {action_description}")
-
-                state = game.get_state()
-                state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
-                if device.type == "cuda":
-                    with torch.no_grad(), torch.cuda.amp.autocast():
-                        _, value = current_model(state_tensor)
-                else:
-                    with torch.no_grad():
-                        _, value = current_model(state_tensor)
-                value = value.item()
-                ppo_buffer.store(
-                    state,
-                    action_idx,
-                    log_prob,
-                    value,
-                    0,  # reward will be filled later
-                    False
-                )
-            else:
-                action = ("PASS", [])
-            player_tag = "RL"
-        else:
-            # Bot turn: Rule-based, fast
-            action = game.suggest_bot_action(current_player)
-            player_tag = f"BOT{current_player}"
-            print(f"[BOT] Player {current_player} action: {action}")
-
-        _, reward, done, _ = game.step(action)
-        if current_player == 0:
-            if ppo_buffer.rewards:
-                ppo_buffer.rewards[-1] = reward
-            if done:
-                ppo_buffer.dones[-1] = True
-
-        turn_time = time.time() - start_turn_time
-        print(f"[TURN] Game {game_id} Turn {turn_count}: Player {current_player} ({player_tag}) took {turn_time:.4f}s")
-
-    final_reward = 10.0 if game.winner == 0 else -10.0
-    # Only add final reward for RL agent
-    if ppo_buffer.rewards and current_player == 0:
-        ppo_buffer.rewards[-1] += final_reward
-
-    if len(ppo_buffer) > 0:
-        return ppo_buffer.get_trajectory(), game.winner
-    return None, game.winner
-
-# Cell 12: Main training loop, sequential, no Ray/multiprocess
 # DummyScaler for CPU training compatibility
 class DummyScaler:
-    """Dummy scaler for CPU training"""
     def scale(self, loss):
         return loss
     def step(self, optimizer):
@@ -1250,26 +1117,174 @@ class DummyScaler:
         pass
 
 def log_gpu_utilization():
-    """
-    Simple CUDA memory/usage print helper (calls nvidia-smi if available for full info).
-    """
     if torch.cuda.is_available():
         print(f"[GPU] Memory allocated: {torch.cuda.memory_allocated()/1e6:.2f} MB")
         print(f"[GPU] Memory reserved: {torch.cuda.memory_reserved()/1e6:.2f} MB")
         try:
-            utilization = None
             import subprocess
-            # Try to get GPU utilization from nvidia-smi, fallback if not available
             smi_out = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]
             ).decode().strip().split('\n')[0]
             utilization = float(smi_out)
             print(f"[GPU] Utilization: {utilization:.1f}%")
-            if utilization < 60:
-                print("[WARNING] GPU utilization low (<60%). Consider increasing batch size or model size.")
         except Exception:
             print("[GPU] Could not get utilization, nvidia-smi not available or failed.")
 
+# Guided Exploration
+def guided_exploration(game_state, model, valid_actions, game):
+    # Use model to predict potential actions
+    state_tensor = torch.tensor(game_state).float().unsqueeze(0).to(device)
+    with torch.no_grad():
+        action_logits, _ = model(state_tensor)
+        action_probs = F.softmax(action_logits, dim=1).cpu().numpy()[0]
+    
+    # Create action mapping
+    action_ids = [action_to_id(action) for action in valid_actions]
+    valid_probs = [action_probs[aid] for aid in action_ids]
+    
+    if sum(valid_probs) > 0:
+        valid_probs = np.array(valid_probs) / sum(valid_probs)
+    else:
+        valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
+    
+    # Heuristic: Prefer playing pairs/triples of low cards in early game
+    total_played = 52 - sum(len(p.hand) for p in game.players)
+    if total_played < 15:
+        low_actions = []
+        for i, action in enumerate(valid_actions):
+            if action[0] in ["PAIR", "TRIPLE"]:
+                if all(card.rank in ['3','4','5','6'] for card in action[1]):
+                    low_actions.append(i)
+        if low_actions:
+            probs = np.zeros(len(valid_actions))
+            for idx in low_actions:
+                probs[idx] = valid_probs[idx] * 2.0  # Double probability
+            if probs.sum() > 0:
+                probs /= probs.sum()
+                valid_probs = probs
+                return np.random.choice(len(valid_actions), p=probs), valid_probs
+    
+    # Heuristic: Save bombs for late game
+    if total_played < 30:
+        bomb_actions = [i for i, action in enumerate(valid_actions) if action[0] == "BOMB"]
+        if bomb_actions:
+            probs = np.array(valid_probs)
+            for idx in bomb_actions:
+                probs[idx] *= 0.3  # Reduce bomb probability
+            probs /= probs.sum()
+            valid_probs = probs
+            return np.random.choice(len(valid_actions), p=probs), valid_probs
+    
+    # Default: Use model probabilities
+    return np.random.choice(len(valid_actions), p=valid_probs), valid_probs
+
+# Enhanced self-play with rewind mechanism
+def self_play_game(model, game_id, model_pool=None):
+    game = TienLenGame(game_id)
+    ppo_buffer = PPOBuffer()
+    rewind_buffer = RewindBuffer(max_depth=5)
+    
+    # Model selection
+    current_model = model
+    if model_pool and random.random() < 0.25:
+        model_path = random.choice(model_pool)
+        current_model = TienLenNet().to(device)
+        current_model.load_state_dict(torch.load(model_path, map_location=device))
+        current_model.eval()
+
+    mcts = MCTS(current_model, num_simulations=500)
+    turn_count = 0
+    win_prob = 0.5  # Default win probability
+    
+    while not game.done and turn_count < 500:
+        turn_count += 1
+        current_player = game.current_player
+        start_turn_time = time.time()
+
+        if current_player == 0:  # RL player
+            state = game.get_state()
+            rewind_buffer.push(state, None)
+            
+            # Rewind Mechanism (40% chance to rewind)
+            if np.random.rand() < 0.4:
+                rewind_steps = np.random.randint(1, 4)
+                rewind_state = rewind_buffer.rewind(rewind_steps)
+                if rewind_state is not None:
+                    state = rewind_state
+            
+            valid_actions = game.get_valid_combos(current_player, use_cache=True)
+            
+            # Guided Exploration (30% chance)
+            if np.random.rand() < 0.3:
+                action_idx, valid_probs = guided_exploration(state, current_model, valid_actions, game)
+                log_prob = np.log(valid_probs[action_idx] + 1e-10)
+                action = valid_actions[action_idx]
+            else:
+                # Standard MCTS
+                action_probs = mcts.run(game)
+                valid_probs = []
+                for action in valid_actions:
+                    idx = action_to_id(action)
+                    valid_probs.append(action_probs[idx])
+                
+                if sum(valid_probs) > 0:
+                    valid_probs = np.array(valid_probs) / sum(valid_probs)
+                else:
+                    valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
+                
+                action_idx = np.random.choice(len(valid_actions), p=valid_probs)
+                action = valid_actions[action_idx]
+                log_prob = np.log(valid_probs[action_idx] + 1e-10)
+            
+            # Get value estimate
+            state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                _, value = current_model(state_tensor)
+            value = value.item()
+            
+            # Store in buffer
+            ppo_buffer.store(state, action_idx, log_prob, value, 0, False)
+            
+            # Log action
+            action_desc = f"{action[0]}: {[f'{c.rank}_{c.suit[:1]}' for c in action[1]]}"
+            print(f"[RL] Player 0 action: {action_desc}")
+            player_tag = "RL"
+        else:  # Bot player
+            action = game.suggest_bot_action(current_player)
+            player_tag = f"BOT{current_player}"
+            # BOT action log removed
+        
+        # Execute action
+        _, reward, done, _ = game.step(action)
+        
+        # Update reward for RL player
+        if current_player == 0 and ppo_buffer.rewards:
+            ppo_buffer.rewards[-1] = reward
+            if done:
+                ppo_buffer.dones[-1] = True
+                win_prob = 1.0 if game.winner == 0 else 0.0
+        
+        turn_time = time.time() - start_turn_time
+        # Removed detailed TURN logs to only show RL actions
+    
+    # Final reward for RL player
+    if game.winner == 0:
+        final_reward = 10.0
+        win_prob = 1.0
+    else:
+        final_reward = -10.0
+        win_prob = 0.0
+        
+    if ppo_buffer.rewards and game.current_player == 0:
+        ppo_buffer.rewards[-1] += final_reward
+    
+    trajectory = None
+    if len(ppo_buffer) > 0:
+        trajectory = ppo_buffer.get_trajectory()
+    
+    return trajectory, game.winner, win_prob
+
+# Main training loop
 def main_train_loop(total_episodes=500):
     print("Initializing training process...")
 
@@ -1284,14 +1299,12 @@ def main_train_loop(total_episodes=500):
         model.load_state_dict(torch.load(model_path, map_location=device))
         start_epoch = int(model_path.split("_")[-1].split(".")[0]) if "epoch" in model_path else 0
 
-    # Replay buffer
-    buffer = ReplayBuffer(capacity=50000)
+    # Strategic replay buffer
+    buffer = StrategicReplayBuffer(capacity=50000)
 
-    # Model pool for prev models (epoch checkpoints)
+    # Model pool for prev models
     model_pool = []
     model_pool_size = 5
-
-    # Load existing models
     saved_models = glob.glob("saved_models/tien_len_net_*.pth")
     saved_models.sort(key=os.path.getmtime, reverse=True)
     model_pool = saved_models[:model_pool_size]
@@ -1302,19 +1315,19 @@ def main_train_loop(total_episodes=500):
         optimizer, 'min', patience=5, factor=0.5
     )
     if device.type == "cuda":
-        scaler = torch.amp.GradScaler(enabled=True)
+        scaler = torch.cuda.amp.GradScaler(enabled=True)
     else:
         scaler = DummyScaler()
 
-    # AI Feedback: Training process improvements
-    games_per_episode = 100   # Increased from 30 → 100
-    training_steps = 50       # Same as original
-    min_buffer_size = 200     # Lower from 500
-    batch_size = 512          # Unchanged
+    # Training parameters
+    games_per_episode = 100
+    training_steps = 50
+    min_buffer_size = 200
+    batch_size = 512
     best_win_rate = 0.0
-    strong_performance_count = 0  # For early stopping
+    strong_performance_count = 0
 
-    for episode in range(start_epoch, total_episodes):
+    for episode in tqdm(range(start_epoch, total_episodes), desc="Training Episodes", unit="ep", initial=start_epoch, total=total_episodes):
         print(f"\n=== Episode {episode+1}/{total_episodes} | Buffer: {len(buffer)} | LR: {optimizer.param_groups[0]['lr']:.2e} ===")
         start_time = time.time()
         episode_wins = 0
@@ -1322,14 +1335,12 @@ def main_train_loop(total_episodes=500):
         for i in range(games_per_episode):
             game_id = episode * games_per_episode + i
             print(f"Starting game {i+1}/{games_per_episode} (ID: {game_id})")
-            game_start = time.time()
-            trajectory, winner = self_play_game(model, game_id, model_pool)
+            trajectory, winner, win_prob = self_play_game(model, game_id, model_pool)
             if winner == 0:
                 episode_wins += 1
-            game_time = time.time() - game_start
-            print(f"Game completed in {game_time:.2f}s. {'RL Agent won!' if winner == 0 else 'Bot won.'}")
+            print(f"Game completed. {'RL Agent won!' if winner == 0 else 'Bot won.'}")
             if trajectory is not None:
-                buffer.push(trajectory)
+                buffer.push(trajectory, win_prob)
 
         win_rate = episode_wins / games_per_episode
         print(f"Collected {games_per_episode} games | Win rate: {win_rate:.2f} | Buffer size: {len(buffer)}")
@@ -1344,23 +1355,82 @@ def main_train_loop(total_episodes=500):
             continue
 
         train_losses, policy_losses, value_losses = [], [], []
-        for step in range(training_steps):
+        for step in tqdm(range(training_steps), desc=f"Training Episode {episode+1}", unit="step"):
             step_start = time.time()
-            results = ppo_train(model, buffer, optimizer, scaler, batch_size=batch_size)
-            if results is None:
-                continue
+            
+            # Sample with priority to winning games
+            trajectories = buffer.sample(batch_size, win_sample_ratio=0.7)
+            
+            total_loss = 0.0
+            total_policy_loss = 0.0
+            total_value_loss = 0.0
+            total_entropy_loss = 0.0
+            
+            for traj in trajectories:
+                states = torch.tensor(traj['states']).float().to(device)
+                actions = torch.tensor(traj['actions']).long().to(device)
+                old_log_probs = torch.tensor(traj['log_probs']).float().to(device)
+                returns = torch.tensor(traj['returns']).float().to(device)
+                advantages = torch.tensor(traj['advantages']).float().to(device)
+                old_values = torch.tensor(traj['values']).float().to(device)
+                
+                # PPO update
+                for _ in range(4):  # PPO epochs
+                    # Get new policy and values
+                    policy_pred, value_pred = model(states)
+                    value_pred = value_pred.squeeze()
 
-            loss, policy_loss, value_loss, entropy_loss = results
-            train_losses.append(loss)
-            policy_losses.append(policy_loss)
-            value_losses.append(value_loss)
+                    # Calculate new log probabilities
+                    dist = torch.distributions.Categorical(logits=policy_pred)
+                    new_log_probs = dist.log_prob(actions)
 
+                    # Policy loss (clipped surrogate)
+                    ratio = (new_log_probs - old_log_probs).exp()
+                    surr1 = ratio * advantages
+                    surr2 = torch.clamp(ratio, 1.0 - 0.2, 1.0 + 0.2) * advantages
+                    policy_loss = -torch.min(surr1, surr2).mean()
+
+                    # Value loss (clipped)
+                    value_pred_clipped = old_values + torch.clamp(value_pred - old_values, -0.2, 0.2)
+                    value_loss1 = F.mse_loss(value_pred, returns)
+                    value_loss2 = F.mse_loss(value_pred_clipped, returns)
+                    value_loss = torch.max(value_loss1, value_loss2).mean()
+
+                    # Entropy bonus
+                    entropy_loss = -dist.entropy().mean()
+
+                    # Total loss
+                    loss = policy_loss + 0.5 * value_loss + 0.05 * entropy_loss
+
+                    # Backpropagation
+                    optimizer.zero_grad()
+                    if device.type == "cuda":
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
+
+                    total_loss += loss.item()
+                    total_policy_loss += policy_loss.item()
+                    total_value_loss += value_loss.item()
+                    total_entropy_loss += entropy_loss.item()
+                    
+            avg_loss = total_loss / len(trajectories)
+            train_losses.append(avg_loss)
+            
             if step % 10 == 0:
-                print(f"Step {step+1}/{training_steps} | Loss: {loss:.4f} | Time: {time.time()-step_start:.2f}s")
+                # calculate ETA for remaining training steps
+                step_time = time.time() - step_start
+                remaining_steps = training_steps - step - 1
+                eta = remaining_steps * step_time
+                eta_min = eta / 60.0
+                print(f"Step {step+1}/{training_steps} | Loss: {avg_loss:.4f} | Time: {step_time:.2f}s | ETA: {eta_min:.2f}min")
 
         if train_losses:
-            avg_loss = sum(train_losses) / len(train_losses)
-            scheduler.step(avg_loss)
+            avg_epoch_loss = sum(train_losses) / len(train_losses)
+            scheduler.step(avg_epoch_loss)
 
         # Early stopping if strong performance for 3 evals > 60%
         if (episode+1) % 10 == 0:
@@ -1408,7 +1478,7 @@ def main_train_loop(total_episodes=500):
 
     print("Training completed!")
 
-# Cell 13: Evaluation function (unchanged)
+# Evaluation function
 def evaluate(model, num_games=20):
     model_wins = 0
     for game_id in range(num_games):
@@ -1416,46 +1486,41 @@ def evaluate(model, num_games=20):
         while not game.done:
             current_player = game.current_player
             state = game.get_state()
-            state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
-            with torch.no_grad():
-                action_logits, _ = model(state_tensor)
-                action_probs = F.softmax(action_logits, dim=1).cpu().numpy()[0]
-
-            valid_actions = game.get_valid_combos(current_player)
-            if valid_actions:
-                # Collect probabilities for valid actions only
-                valid_probs = []
-                for action in valid_actions:
-                    action_str = json.dumps({
-                        "type": action[0],
-                        "cards": [card_to_json(c) for c in action[1]]
-                    })
-                    idx = action_to_id(action)
-                    valid_probs.append(action_probs[idx])
-
-                valid_probs = np.array(valid_probs)
-                if valid_probs.sum() > 0:
-                    valid_probs /= valid_probs.sum()
+            
+            if current_player == 0:  # Model's turn
+                state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
+                with torch.no_grad():
+                    action_logits, _ = model(state_tensor)
+                    action_probs = F.softmax(action_logits, dim=1).cpu().numpy()[0]
+                
+                valid_actions = game.get_valid_combos(current_player)
+                if valid_actions:
+                    valid_probs = []
+                    for action in valid_actions:
+                        idx = action_to_id(action)
+                        valid_probs.append(action_probs[idx])
+                    
+                    if sum(valid_probs) > 0:
+                        valid_probs = np.array(valid_probs) / sum(valid_probs)
+                    else:
+                        valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
+                    
+                    action_idx = np.argmax(valid_probs)
+                    action = valid_actions[action_idx]
                 else:
-                    valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
-
-                action_idx = np.random.choice(len(valid_actions), p=valid_probs)
-                action = valid_actions[action_idx]
+                    action = ("PASS", [])
             else:
-                action = ("PASS", [])
-
+                action = game.suggest_bot_action(current_player)
+                
             game.step(action)
-
+            
         if game.winner == 0:
             model_wins += 1
 
     return model_wins / num_games
 
-# Cell 14: Run training
+# Run training
 if __name__ == "__main__":
-    # =============================== #
-    #   GPU/Colab Environment Check   #
-    # =============================== #
     print("\n===== GPU & Torch Environment Info =====")
     print(f"PyTorch version: {torch.__version__}")
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -1470,31 +1535,21 @@ if __name__ == "__main__":
             print(smi)
         except Exception:
             print("nvidia-smi not available or failed.")
-        # Test allocation
-        test_tensor = torch.randn(3, 3).to("cuda")
-        print(f"Test tensor device: {test_tensor.device}")
     else:
         print("Warning: CUDA not available! Training will run on CPU and be much slower.")
     print("========================================\n")
 
-    # ============================== #
-    #   Pick training parameters     #
-    # ============================== #
     try:
         n_episodes = int(input("Enter number of training episodes (default 100): ") or 100)
     except Exception:
         n_episodes = 100
 
-    # ===== Run Main Training Loop with interrupt save =====
     try:
         main_train_loop(n_episodes)
     except KeyboardInterrupt:
         print("\nTraining interrupted by user (KeyboardInterrupt)!")
-        # Try to save model if available
         import sys
-        model = None
         main_globals = sys.modules['__main__'].__dict__
-        # Try to get model from main_train_loop scope if defined globally
         model = main_globals.get('model', None)
         try:
             if model is not None:
