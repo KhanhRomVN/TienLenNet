@@ -920,7 +920,7 @@ class Node:
 
 # Cell 7: MCTS with continual resolving and caching (unchanged)
 class MCTS:
-    def __init__(self, model, num_simulations=200, use_cache=True, use_continual_resolving=True):
+    def __init__(self, model, num_simulations=500, use_cache=True, use_continual_resolving=True):
         self.model = model
         self.num_simulations = num_simulations
         self.use_cache = use_cache
@@ -1118,7 +1118,7 @@ def ppo_train(model, buffer, optimizer, scaler, clip_epsilon=0.2, ppo_epochs=4, 
             entropy_loss = -dist.entropy().mean()
 
             # Total loss
-            loss = policy_loss + 0.5 * value_loss + 0.01 * entropy_loss
+            loss = policy_loss + 0.5 * value_loss + 0.05 * entropy_loss
 
             # Backpropagation
             optimizer.zero_grad()
@@ -1152,7 +1152,7 @@ def self_play_game(model, game_id, model_pool=None, use_continual_resolving=True
         current_model.eval()
 
     # Use MCTS with optimized default number of simulations (num_simulations=10)
-    mcts = MCTS(current_model)
+    mcts = MCTS(current_model, num_simulations=500)
 
     turn_count = 0
     while not game.done and turn_count < 500:
@@ -1307,7 +1307,7 @@ def main_train_loop(total_episodes=500):
         scaler = DummyScaler()
 
     # AI Feedback: Training process improvements
-    games_per_episode = 30    # Increased from 10
+    games_per_episode = 100   # Increased from 30 → 100
     training_steps = 50       # Same as original
     min_buffer_size = 200     # Lower from 500
     batch_size = 512          # Unchanged
