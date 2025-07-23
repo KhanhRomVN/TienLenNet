@@ -869,6 +869,15 @@ class RewindBuffer:
     def get_current_state(self):
         return self.buffer[self.current_index][0] if self.current_index >= 0 else None
 
+# Base ReplayBuffer for experience storage
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = deque(maxlen=capacity)
+    def __len__(self):
+        return len(self.buffer)
+
+# Strategic Experience Replay
 # Strategic Experience Replay
 class StrategicReplayBuffer(ReplayBuffer):
     def __init__(self, capacity=100000):
@@ -1212,20 +1221,40 @@ def self_play_game(model, game_id, model_pool=None):
                 if rewind_state is not None:
                     state = rewind_state
             
+            # Log previous BOT action
+            if game.history:
+                prev_player, prev_action = game.history[-1]
+                if prev_player != 0:
+                    bot_cards = ", ".join(f"{c.rank}_{c.suit[:1]}" for c in prev_action[1])
+                    print(f"[BOT{prev_player}] played {prev_action[0]}: [{bot_cards}]", flush=True)
+# Log RL current hand
+            hand_cards = ", ".join(f"{c.rank}_{c.suit[:1]}" for c in game.players[0].hand)
+            print(f"[RL] Hand: [{hand_cards}]", flush=True)
             valid_actions = game.get_valid_combos(current_player, use_cache=True)
+            print(f"[RL] Valid moves count: {len(valid_actions)}")
+            print("[RL] Valid moves list: " + ", ".join(
+                f"{action[0]}: {[f'{c.rank}_{c.suit[:1]}' for c in action[1]]}"
+                for action in valid_actions
+            ))
             
             # Guided Exploration (30% chance)
             if np.random.rand() < 0.3:
+                print("[LOG] Guided exploration triggered")  # Debug guided path
                 action_idx, valid_probs = guided_exploration(state, current_model, valid_actions, game)
                 log_prob = np.log(valid_probs[action_idx] + 1e-10)
                 action = valid_actions[action_idx]
+                print(f"[Guided] action={action[0]}: {[f'{c.rank}_{c.suit[:1]}' for c in action[1]]}, prob={valid_probs[action_idx]:.4f}")
             else:
                 # Standard MCTS
+                print("[LOG] Running MCTS simulations")  # Debug MCTS start
                 action_probs = mcts.run(game)
+                print(f"[MCTS] total_prob_sum={action_probs.sum():.4f}")
                 valid_probs = []
                 for action in valid_actions:
                     idx = action_to_id(action)
                     valid_probs.append(action_probs[idx])
+                top5 = sorted(zip(valid_actions, valid_probs), key=lambda x: -x[1])[:5]
+                print("[MCTS] Top5 candidates:", ", ".join(f"{a[0]}:{p:.4f}" for a,p in top5))
                 
                 if sum(valid_probs) > 0:
                     valid_probs = np.array(valid_probs) / sum(valid_probs)
@@ -1241,6 +1270,7 @@ def self_play_game(model, game_id, model_pool=None):
             with torch.no_grad():
                 _, value = current_model(state_tensor)
             value = value.item()
+            print(f"[PPO] log_prob={log_prob:.4f}, value={value:.4f}")  # Debug PPO metrics
             
             # Store in buffer
             ppo_buffer.store(state, action_idx, log_prob, value, 0, False)
@@ -1251,6 +1281,9 @@ def self_play_game(model, game_id, model_pool=None):
             player_tag = "RL"
         else:  # Bot player
             action = game.suggest_bot_action(current_player)
+            # Log every BOT action
+            cards_str = ", ".join(f"{c.rank}_{c.suit[:1]}" for c in action[1])
+            print(f"[BOT{current_player}] played {action[0]}: [{cards_str}]")
             player_tag = f"BOT{current_player}"
             # BOT action log removed
         
@@ -1278,6 +1311,8 @@ def self_play_game(model, game_id, model_pool=None):
     if ppo_buffer.rewards and game.current_player == 0:
         ppo_buffer.rewards[-1] += final_reward
     
+# Log final game result
+    print(f"[GAME {game_id}] Winner: Player {game.winner}, win_prob={win_prob:.2f}")
     trajectory = None
     if len(ppo_buffer) > 0:
         trajectory = ppo_buffer.get_trajectory()
@@ -1520,7 +1555,7 @@ def evaluate(model, num_games=20):
     return model_wins / num_games
 
 # Run training
-if __name__ == "__main__":
+if False and __name__ == "__main__":
     print("\n===== GPU & Torch Environment Info =====")
     print(f"PyTorch version: {torch.__version__}")
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -1561,3 +1596,14 @@ if __name__ == "__main__":
         print(f"\nUnexpected error: {e}")
         import traceback
         traceback.print_exc()
+# Single-game test entrypoint
+if __name__ == "__main__" and False:
+    pass  # Original training entry disabled
+
+if __name__ == "__main__":
+    # Initialize a fresh model for testing
+    model = TienLenNet().to(device)
+    print("===== Single Test Game =====")
+    model.eval()
+    trajectory, winner, win_prob = self_play_game(model, game_id=0, model_pool=[])
+    print(f"Test game finished. Winner: {winner}, Win probability: {win_prob:.2f}")
