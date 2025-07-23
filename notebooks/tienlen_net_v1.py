@@ -1253,6 +1253,10 @@ def self_play_game(model, game_id, model_pool=None):
                 for action in valid_actions:
                     idx = action_to_id(action)
                     valid_probs.append(action_probs[idx])
+                # Log full valid-action probabilities
+                print("[MCTS] All valid-action probs: " + ", ".join(
+                    f"{act[0]}:{prob:.4f}" for act, prob in zip(valid_actions, valid_probs)
+                ))
                 top5 = sorted(zip(valid_actions, valid_probs), key=lambda x: -x[1])[:5]
                 print("[MCTS] Top5 candidates:", ", ".join(f"{a[0]}:{p:.4f}" for a,p in top5))
                 
@@ -1268,7 +1272,13 @@ def self_play_game(model, game_id, model_pool=None):
             # Get value estimate
             state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
             with torch.no_grad():
-                _, value = current_model(state_tensor)
+                policy_logits, value = current_model(state_tensor)
+            # Compute and log model policy over valid moves
+            policy_probs = torch.softmax(policy_logits, dim=1).cpu().numpy()[0]
+            valid_model_probs = [policy_probs[action_to_id(act)] for act in valid_actions]
+            print("[PPO] Model policy for valid moves: " + ", ".join(
+                f"{act[0]}:{prob:.4f}" for act, prob in zip(valid_actions, valid_model_probs)
+            ))
             value = value.item()
             print(f"[PPO] log_prob={log_prob:.4f}, value={value:.4f}")  # Debug PPO metrics
             
