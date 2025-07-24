@@ -17,47 +17,6 @@ import copy
 import json
 from datetime import datetime
 import lz4.frame
-# --- Pretraining and Simulation Utility Functions ---
-
-def rule_based_evaluation(game):
-    """Simple heuristic evaluation for untrained models"""
-    if game.done:
-        return 10.0 if game.winner == 0 else -10.0
-    player_hand_size = len(game.players[0].hand)
-    avg_opponent_hand = sum(len(p.hand) for p in game.players[1:]) / (len(game.players) - 1)
-    return (avg_opponent_hand - player_hand_size) / 10.0
-
-def generate_training_data(num_samples):
-    """Generate supervised examples from random rule-based plays"""
-    import random
-    from torch.nn.functional import one_hot
-    states, targets = [], []
-    for _ in range(num_samples):
-        game = TienLenGame(-1)
-        state = game.get_state()
-        valid_actions = game.get_valid_combos(0)
-        if not valid_actions:
-            continue
-        action = random.choice(valid_actions)
-        idx = action_to_id(action)
-        states.append(torch.tensor(state).float().unsqueeze(0))
-        targets.append(idx)
-    return states, targets
-
-def pretrain_model(model, epochs=10, samples_per_epoch=200):
-    """Pretrain model with random rule-based data"""
-    model.is_pretrained = False
-    optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    for epoch in range(epochs):
-        states, targets = generate_training_data(samples_per_epoch)
-        for state, tgt in zip(states, targets):
-            optimizer.zero_grad()
-            policy_pred, _ = model(state.to(device))
-            loss = F.cross_entropy(policy_pred, torch.tensor([tgt], device=device))
-            loss.backward()
-            optimizer.step()
-    model.is_pretrained = True
-    print(f"[PRETRAIN] Completed {epochs} epochs of supervised pretraining")
 import glob
 import gc
 import itertools
@@ -70,18 +29,11 @@ def card_to_json(card):
 
 # Stable mapping from action to id (modulo 200)
 def action_to_id(action):
-    """Stable mapping of action tuple ('TYPE', list_of_cards) to [0,200)"""
+    """Produce a stable index [0,200) for an action tuple ('TYPE', list_of_cards)"""
     action_type, cards = action
-    # action type codes
-    type_codes = {"SINGLE": 0, "PAIR": 1, "TRIPLE": 2, "STRAIGHT": 3, "BOMB": 4, "CONSEC_PAIRS": 5}
-    # sort cards for consistency
-    sorted_cards = sorted(cards, key=lambda c: (c.suit, c.rank))
-    base_id = type_codes.get(action_type, 0) * 100
-    for i, card in enumerate(sorted_cards[:3]):  # limit to first 3 cards
-        rank_val = TienLenGame.RANK_VALUES[card.rank]
-        suit_val = TienLenGame.SUIT_ORDER[card.suit]
-        base_id += (rank_val * 4 + suit_val) * (10 ** i)
-    return base_id % 200
+    # for 'cards', sort by (suit, rank) for determinism
+    key = (action_type, tuple(sorted((card.suit, card.rank) for card in cards)))
+    return hash(key) % 200
 
 # Setup logger
 def setup_logger(log_id):
@@ -275,10 +227,6 @@ class TienLenGame:
                         combo_value = self.get_combo_value(combo)
                         if combo_value > current_value:
                             filtered_combos.append(combo)
-                # Allow using BOMB to override any filtered combos
-                bomb_actions = [c for c in valid_combos if c[0] == "BOMB"]
-                if bomb_actions:
-                    filtered_combos += bomb_actions
                 return filtered_combos
 
             # If starting/leading, allow any (except pass)
@@ -354,9 +302,6 @@ class TienLenGame:
 
     def suggest_bot_action(self, player_idx):
         valid_actions = self.get_valid_combos(player_idx)
-# Easy mode: 50% random moves for non-player agents
-        if player_idx > 0 and random.random() < 0.5:
-            return random.choice(valid_actions) if valid_actions else ("PASS", [])
         player = self.players[player_idx]
         hand = player.hand
 
@@ -695,7 +640,6 @@ class TienLenGame:
             raise ValueError("Game is already over")
         action_type, cards = action
         player = self.players[self.current_player]
-        prev_hand_size = len(player.hand)
         reward = 0
 
         # Save previous combo before action for reward shaping
@@ -730,17 +674,11 @@ class TienLenGame:
                 raise ValueError("Cannot PASS when there's no current combo")
             self.broke_combo = False
 
-# Penalty for PASS when there are valid non-pass actions
-        if action_type == "PASS" and any(a[0] != "PASS" for a in self.get_valid_combos(self.current_player)):
-            reward -= 0.5
         # ======= Reward Shaping: Encourage playing cards and blocking combos =======
         if action_type != "PASS":
             # Small reward for playing cards
             reward += 0.1 * len(cards)
             
-            # Reward proportional to hand size reduction
-            hand_size_reward = (prev_hand_size - len(player.hand)) * 0.2
-            reward += hand_size_reward
             # Reward for breaking combo: if responding to another player's combo and beating it
             broke_combo = False
             if (
@@ -791,35 +729,36 @@ class TienLenGame:
         return self.get_state(), reward, self.done, {}
 
     def get_state(self):
-        """Enhanced: Return game state as a numpy array with richer channels"""
-        # Channels:
-        # 0-3: each player's hand mask
-        # 4-7: current turn one-hot (channel 4+i if current_player == i)
-        # 8-10: last 3 moves masks with decay
-        state = np.zeros((12, 4, 13), dtype=np.float32)
+        """Optimized/Vectorized: Return game state as a numpy array"""
+        state = np.zeros((6, 4, 13), dtype=np.float32)
 
-        # Channels 0-3: hands of all players
-        for pid, player in enumerate(self.players):
-            mask = np.zeros((4, 13), dtype=bool)
-            for card in player.hand:
-                s = self.SUIT_ORDER[card.suit]
-                r = self.RANK_VALUES[card.rank]
-                mask[s, r] = True
-            state[pid] = mask.astype(np.float32)
+        # Channel 0: Current player's hand (vectorized)
+        player = self.players[self.current_player]
+        hand_mask = np.zeros((4, 13), dtype=bool)
+        for card in player.hand:
+            suit_idx = self.SUIT_ORDER[card.suit]
+            rank_idx = self.RANK_VALUES[card.rank]
+            hand_mask[suit_idx, rank_idx] = True
+        state[0] = hand_mask.astype(np.float32)
 
-        # Channels 4-7: current player one-hot over full feature map
-        turn_ch = 4 + self.current_player
-        state[turn_ch, :, :] = 1.0
+        # Channel 4: Current combo
+        if self.current_combo and self.current_combo[0] != "PASS":
+            combo_mask = np.zeros((4, 13), dtype=bool)
+            for card in self.current_combo[1]:
+                suit_idx = self.SUIT_ORDER[card.suit]
+                rank_idx = self.RANK_VALUES[card.rank]
+                combo_mask[suit_idx, rank_idx] = True
+            state[4] = combo_mask.astype(np.float32)
 
-        # Channels 8-10: up to last 3 actions
-        for i, (_, action) in enumerate(self.history[-3:]):
-            move_mask = np.zeros((4, 13), dtype=np.float32)
+        # Channel 5: Last played cards from up to last 3 actions (vectorized)
+        last_plays = np.zeros((4, 13), dtype=np.float32)
+        for i, (player_idx, action) in enumerate(self.history[-3:]):
             if action[0] != "PASS":
                 for card in action[1]:
-                    s = self.SUIT_ORDER[card.suit]
-                    r = self.RANK_VALUES[card.rank]
-                    move_mask[s, r] = 1.0 - (i * 0.3)
-            state[8 + i] = move_mask
+                    suit_idx = self.SUIT_ORDER[card.suit]
+                    rank_idx = self.RANK_VALUES[card.rank]
+                    last_plays[suit_idx, rank_idx] = 1.0 - (i * 0.3)
+        state[5] = last_plays
 
         return state
 
@@ -866,8 +805,7 @@ class ResidualBlock(nn.Module):
 class TienLenNet(nn.Module):
     def __init__(self):
         super(TienLenNet, self).__init__()
-        # Input has 12 channels (4 hand masks + 4 turn + 3 move decays + 1 reserved)
-        self.conv1 = nn.Conv2d(12, 128, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(6, 128, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(128)
 
         # Residual blocks
@@ -984,18 +922,16 @@ class ParallelMCTS:
         self.model = model
         self.num_simulations = num_simulations
         self.num_workers = num_workers
+        self.pool = multiprocessing.Pool(num_workers)
         self.analysis_log = []
         self.win_paths = []
 
     def simulate(self, root, sim_id):
         """Run one simulation with detailed analysis"""
         node = root
-        # Random exploration: occasionally start from a random child
-        if random.random() < 0.3 and root.children:
-            node = random.choice(root.children)
         tmp_game = node.game_instance.copy()
         depth = 0
-        max_depth = 500
+        max_depth = 200
         path = []
         start_time = time.time()
 
@@ -1025,21 +961,13 @@ class ParallelMCTS:
                 break
 
         if not tmp_game.done:
-            # Use rule-based evaluation if model untrained
-            if not getattr(self.model, "is_pretrained", False):
-                result = rule_based_evaluation(tmp_game)
-            else:
-                state = tmp_game.get_state()
-                state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
-                with torch.no_grad():
-                    _, value = self.model(state_tensor)
-                result = value.item()
+            state = tmp_game.get_state()
+            state_tensor = torch.tensor(state).float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                _, value = self.model(state_tensor)
+            result = value.item()
         else:
             result = 1.0 if tmp_game.winner == 0 else -1.0
-
-        # if this sim found a win after some play, log its path
-        if result > 0 and depth > 3:
-            self.win_paths.append({"sim_id": sim_id, "value": result, "path": path})
 
         return {
             "id": sim_id,
@@ -1057,14 +985,13 @@ class ParallelMCTS:
 
         # Run simulations in parallel
         results = []
-        with multiprocessing.Pool(self.num_workers) as pool:
-            asyncs = [pool.apply_async(self.simulate, (root, i)) for i in range(self.num_simulations)]
-            for a in asyncs:
-                try:
-                    res = a.get(timeout=2.0)
-                    results.append(res)
-                except multiprocessing.TimeoutError:
-                    continue
+        asyncs = [self.pool.apply_async(self.simulate, (root, i)) for i in range(self.num_simulations)]
+        for a in asyncs:
+            try:
+                res = a.get(timeout=2.0)
+                results.append(res)
+            except multiprocessing.TimeoutError:
+                continue
 
         # Analyze results
         win_count = sum(1 for r in results if r["win"])
@@ -1421,12 +1348,16 @@ def self_play_game(model, game_id, model_pool=None):
 
             # Filter valid actions
             valid_actions = game.get_valid_combos(0)
-            # Use guided exploration to refine probabilities
-            action_idx, valid_probs = guided_exploration(state, current_model, valid_actions, game)
+            valid_probs = [action_probs[action_to_id(a)] for a in valid_actions]
+            if sum(valid_probs) > 0:
+                valid_probs = np.array(valid_probs) / sum(valid_probs)
+            else:
+                valid_probs = np.ones(len(valid_actions)) / len(valid_actions)
+
+            # Sample action
+            action_idx = np.random.choice(len(valid_actions), p=valid_probs)
             action = valid_actions[action_idx]
             log_prob = np.log(valid_probs[action_idx] + 1e-10)
-            # Log chosen guided action
-            print(f"[Guided] Chosen action {action_idx}: {action[0]} -> prob={valid_probs[action_idx]:.4f}")
 
             # Store experience
             ppo_buffer.store(state, action_idx, log_prob, win_prob, 0, False)
@@ -1441,19 +1372,6 @@ def self_play_game(model, game_id, model_pool=None):
                 ppo_buffer.dones[-1] = True
                 win_prob = 1.0 if game.winner == 0 else 0.0
 
-    # Post-game summary
-    print(f"\n===== GAME {game_id} FINAL REPORT =====")
-    print(f"Winner: Player {game.winner}")
-    print(f"Total turns: {len(game.history)}")
-    for i, player in enumerate(game.players):
-        hand_str = ", ".join(f"{c.rank}{c.suit[0]}" for c in player.hand) or "(empty)"
-        print(f"Player {i} final hand: {hand_str}")
-    if mcts.win_paths:
-        print(f"MCTS found {len(mcts.win_paths)} winning paths:")
-        for wp in mcts.win_paths[:3]:
-            print(f"Path {wp['sim_id']} (value={wp['value']:.2f}):")
-            for step in wp['path']:
-                print(f"  Turn {step['depth']}: {step['action']}")
     # Final reward shaping
     final_reward = 10.0 if game.winner == 0 else -10.0
     if ppo_buffer.rewards:
@@ -1618,8 +1536,6 @@ def main_train_loop(total_episodes=500):
 
     # Create model
     model = TienLenNet().to(device)
-    # Pretrain if not already
-    pretrain_model(model, epochs=10)
     print(f"Model architecture:\n{model}")
 
     # Load model if exists
